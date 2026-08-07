@@ -1,0 +1,10 @@
+job_market:
+  target: ci
+  outputs:
+    ci:
+      type: databricks
+      host: "{{ env_var('DATABRICKS_HOST', 'dummy-for-ci') }}"
+      http_path: "/sql/1.0/warehouses/dummy"
+      token: "{{ env_var('DATABRICKS_TOKEN', 'dummy-for-ci') }}"
+      catalog: job_market
+      schema: gold

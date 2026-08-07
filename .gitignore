@@ -33,7 +33,6 @@ Thumbs.db
 dbt/target/
 dbt/dbt_packages/
 dbt/logs/
-dbt/profiles.yml
 
 # Environment / secrets
 .env
