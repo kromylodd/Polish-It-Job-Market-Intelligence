@@ -1,15 +1,7 @@
 name: Deploy Bundle
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "dbt/**"
-      - "notebooks/**"
-      - "resources/**"
-      - "scraper/**"
-      - "databricks.yml"
-  workflow_dispatch: # Manual dispatch for path-filter edge cases
+  workflow_dispatch: # Manual only until Databricks secrets are configured
 
 jobs:
   deploy:
@@ -22,16 +14,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Databricks CLI
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+        run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
 
       - name: Validate bundle
         run: databricks bundle validate -t prod
 
       - name: Deploy bundle
         run: databricks bundle deploy -t prod
-
-      - name: Verify deployment
-        run: |
-          echo "Bundle deployed successfully to prod target"
-          databricks bundle summary -t prod
