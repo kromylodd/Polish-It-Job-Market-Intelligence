@@ -1,19 +1,10 @@
 # Databricks Asset Bundle configuration
-# See: https://docs.databricks.com/dev-tools/bundles/index.html
 
 bundle:
   name: polish-it-job-market-intelligence
 
 include:
   - resources/*.yml
-
-workspace:
-  host: ${var.databricks_host}
-
-variables:
-  databricks_host:
-    description: "Databricks workspace URL"
-    default: ""
 
 targets:
   dev:
