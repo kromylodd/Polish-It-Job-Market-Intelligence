@@ -1,34 +1,31 @@
 {
-  "id": "test-listing-001",
-  "slug": "junior-data-engineer-at-example-corp",
+  "guid": "6bb15506-aca9-40b8-85d6-c666d61aa7a8",
+  "slug": "example-corp-junior-data-engineer-warszawa-data",
   "title": "Junior Data Engineer",
-  "companyName": "Example Corp",
-  "category": "Data",
-  "experienceLevel": "junior",
   "workplaceType": "remote",
-  "multilocation": [
-    {"city": "Warszawa"},
-    {"city": "Kraków"}
+  "workingTime": "full_time",
+  "experienceLevel": "junior",
+  "category": {"key": "data", "parentKey": null},
+  "city": "Warszawa",
+  "street": "ul. Przykładowa 1",
+  "latitude": 52.2296756,
+  "longitude": 21.0122287,
+  "isRemoteInterview": true,
+  "companyName": "Example Corp",
+  "companyLogoThumbUrl": "https://example.com/logo.png",
+  "publishedAt": "2026-08-06T10:00:00.0000000Z",
+  "lastPublishedAt": "2026-08-06T10:00:00.0000000Z",
+  "expiredAt": "2026-09-06T22:59:59.9999999Z",
+  "isOpenToHireUkrainians": false,
+  "locations": [
+    {"city": "Warszawa", "street": "ul. Przykładowa 1", "latitude": 52.2296756, "longitude": 21.0122287, "slug": "example-corp-junior-data-engineer-warszawa-data"},
+    {"city": "Kraków", "street": "-", "latitude": 50.0646501, "longitude": 19.9449799, "slug": "example-corp-junior-data-engineer-krakow-data"}
   ],
   "employmentTypes": [
-    {
-      "type": "b2b",
-      "salary": {
-        "from": 8000,
-        "to": 14000,
-        "currency": "PLN",
-        "isGross": false
-      }
-    },
-    {
-      "type": "permanent",
-      "salary": {
-        "from": 6500,
-        "to": 11000,
-        "currency": "PLN",
-        "isGross": true
-      }
-    }
+    {"from": 8000.0, "fromPerUnit": 8000.0, "to": 14000.0, "toPerUnit": 14000.0, "currency": "PLN", "currencySource": "original", "type": "b2b", "unit": "Month", "gross": false},
+    {"from": 2129.0, "fromPerUnit": 2129.19, "to": 3726.0, "toPerUnit": 3726.08, "currency": "USD", "currencySource": "conversion", "type": "b2b", "unit": "Month", "gross": false},
+    {"from": 6500.0, "fromPerUnit": 6500.0, "to": 11000.0, "toPerUnit": 11000.0, "currency": "PLN", "currencySource": "original", "type": "permanent", "unit": "Month", "gross": true},
+    {"from": 1730.0, "fromPerUnit": 1730.0, "to": 2927.0, "toPerUnit": 2927.0, "currency": "USD", "currencySource": "conversion", "type": "permanent", "unit": "Month", "gross": true}
   ],
   "requiredSkills": [
     {"name": "Python", "level": 3},
@@ -36,10 +33,16 @@
     {"name": "Apache Spark", "level": 2}
   ],
   "niceToHaveSkills": [
-    {"name": "dbt"},
-    {"name": "Airflow"}
+    {"name": "dbt", "level": 1},
+    {"name": "Airflow", "level": 1}
   ],
-  "body": "<p>We are looking for a Junior Data Engineer to join our team. You will work with Python, PySpark, and Databricks. Experience with AWS or Azure is a plus. Knowledge of Docker and Kubernetes is nice to have.</p>",
-  "publishedAt": "2026-08-06T10:00:00Z",
-  "expiresAt": "2026-09-06T10:00:00Z"
+  "languages": [
+    {"code": "en", "level": "B2"},
+    {"code": "pl", "level": "C1"}
+  ],
+  "isPromoted": false,
+  "isSuperOffer": false,
+  "applyMethod": "external",
+  "applyUrl": "https://example.com/apply",
+  "hybridWorkSchedule": null
 }

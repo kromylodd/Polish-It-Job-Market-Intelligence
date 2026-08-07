@@ -1,22 +1,31 @@
 """
-Parser for justjoin.it raw listing data.
+Parser for justjoin.it API response data.
 
-Flattens and normalizes the raw RSC payload into a consistent schema
+Flattens and normalizes the raw API response into a consistent schema
 suitable for upload to the bronze layer.
 
-Fields extracted per listing (from plan):
-- listing_id, slug, title, apply_url
-- company_name
-- category (Backend, Frontend, Data, DevOps, etc.)
-- seniority (Junior, Mid, Senior, Expert)
-- employment_types (B2B, UoP, mandate) with salary per type
-- workplace_type (remote, hybrid, onsite)
-- cities (list — a listing can map to multiple cities)
-- salary_min, salary_max, currency, is_gross
-- required_skills, nice_to_have_skills (structured tags)
-- description (free text — for supplementary tech extraction)
-- posted_date, expiry_date
-- date_collected, source_run_id (added at collection time)
+API response fields per listing (verified 2026-08-07):
+- guid: unique listing ID
+- slug: URL-friendly identifier
+- title: job title
+- companyName: company name
+- category: {key, parentKey}
+- experienceLevel: junior/mid/senior/manager
+- workplaceType: remote/hybrid/office
+- workingTime: full_time/part_time
+- city: primary city
+- locations: [{city, street, latitude, longitude, slug}]
+- employmentTypes: [{from, to, currency, currencySource, type, unit, gross}]
+- requiredSkills: [{name, level}]
+- niceToHaveSkills: [{name, level}] (often empty)
+- languages: [{code, level}]
+- publishedAt: ISO timestamp
+- lastPublishedAt: ISO timestamp
+- expiredAt: ISO timestamp
+- applyMethod: external/internal
+- applyUrl: application URL
+- isPromoted, isSuperOffer: boolean flags
+- hybridWorkSchedule: null or schedule info
 """
 
 import hashlib
@@ -29,23 +38,19 @@ logger = logging.getLogger(__name__)
 
 def parse_listing(raw: dict[str, Any], run_id: str) -> dict[str, Any] | None:
     """
-    Parse a single raw listing into a normalized schema.
+    Parse a single raw API listing into a normalized schema.
 
     Args:
-        raw: Raw listing dictionary from RSC payload.
+        raw: Raw listing dictionary from the API.
         run_id: Unique identifier for this scrape run.
 
     Returns:
         Normalized listing dict, or None if the listing is unparseable.
     """
     try:
-        # TODO: Map actual field names after inspecting live RSC payload
-        # The structure below is based on documented justjoin.it data model
-        # fields — actual key names need verification against a real response.
-
-        listing_id = raw.get("id") or raw.get("slug")
+        listing_id = raw.get("guid") or raw.get("slug")
         if not listing_id:
-            logger.warning("Listing missing id/slug — skipping")
+            logger.warning("Listing missing guid/slug — skipping")
             return None
 
         parsed = {
@@ -53,25 +58,32 @@ def parse_listing(raw: dict[str, Any], run_id: str) -> dict[str, Any] | None:
             "listing_id": str(listing_id),
             "slug": raw.get("slug", ""),
             "title": raw.get("title", ""),
-            "apply_url": raw.get("applyUrl", raw.get("apply_url", "")),
+            "apply_url": raw.get("applyUrl", ""),
+            "apply_method": raw.get("applyMethod", ""),
             # Company
             "company_name": _extract_company_name(raw),
             # Classification
-            "category": raw.get("category", raw.get("marker_icon", "")),
-            "seniority": raw.get("experienceLevel", raw.get("experience_level", "")),
-            "workplace_type": raw.get("workplaceType", raw.get("workplace_type", "")),
+            "category": _extract_category(raw),
+            "seniority": raw.get("experienceLevel", ""),
+            "workplace_type": raw.get("workplaceType", ""),
+            "working_time": raw.get("workingTime", ""),
             # Location (can be multiple cities)
             "cities": _extract_cities(raw),
             # Salary (multiple variants possible per listing)
             "salary_variants": _extract_salary_variants(raw),
-            # Skills (structured tags)
-            "required_skills": _extract_skills(raw, "requiredSkills", "skills"),
-            "nice_to_have_skills": _extract_skills(raw, "niceToHaveSkills", "nice_to_have_skills"),
-            # Description (free text for supplementary tech extraction)
-            "description": raw.get("body", raw.get("description", "")),
+            # Skills (structured tags with levels)
+            "required_skills": _extract_skills(raw, "requiredSkills"),
+            "nice_to_have_skills": _extract_skills(raw, "niceToHaveSkills"),
+            # Languages
+            "languages": raw.get("languages", []),
             # Dates
-            "posted_date": raw.get("publishedAt", raw.get("published_at", "")),
-            "expiry_date": raw.get("expiresAt", raw.get("expires_at", "")),
+            "posted_date": raw.get("publishedAt", ""),
+            "last_published_date": raw.get("lastPublishedAt", ""),
+            "expiry_date": raw.get("expiredAt", ""),
+            # Flags
+            "is_promoted": raw.get("isPromoted", False),
+            "is_super_offer": raw.get("isSuperOffer", False),
+            "is_remote_interview": raw.get("isRemoteInterview", False),
             # Metadata (added at collection time)
             "date_collected": datetime.now(timezone.utc).isoformat(),
             "source_run_id": run_id,
@@ -80,82 +92,79 @@ def parse_listing(raw: dict[str, Any], run_id: str) -> dict[str, Any] | None:
         return parsed
 
     except Exception as e:
-        listing_id = raw.get("id", raw.get("slug", "unknown"))
+        listing_id = raw.get("guid", raw.get("slug", "unknown"))
         logger.error(f"Failed to parse listing {listing_id}: {e}")
         return None
 
 
 def _extract_company_name(raw: dict[str, Any]) -> str:
-    """Extract company name from nested or flat structure."""
-    if "companyName" in raw:
-        return raw["companyName"]
-    if "company_name" in raw:
-        return raw["company_name"]
-    company = raw.get("company", {})
-    if isinstance(company, dict):
-        return company.get("name", "")
-    return ""
+    """Extract company name."""
+    return raw.get("companyName", "")
+
+
+def _extract_category(raw: dict[str, Any]) -> str:
+    """Extract category key from nested or flat structure."""
+    category = raw.get("category", "")
+    if isinstance(category, dict):
+        return category.get("key", "")
+    return str(category) if category else ""
 
 
 def _extract_cities(raw: dict[str, Any]) -> list[str]:
-    """Extract city list from listing (a listing can map to multiple cities)."""
-    # Multiple possible structures — check after live inspection
-    if "multilocation" in raw and raw["multilocation"]:
-        return [loc.get("city", "") for loc in raw["multilocation"] if loc.get("city")]
-    if "city" in raw:
-        return [raw["city"]] if raw["city"] else []
-    if "locations" in raw:
-        return [loc.get("city", "") for loc in raw["locations"] if loc.get("city")]
-    return []
+    """
+    Extract city list from listing.
+    A listing can map to multiple cities via the 'locations' array.
+    """
+    locations = raw.get("locations", [])
+    if locations:
+        return list({loc.get("city", "") for loc in locations if loc.get("city")})
+
+    # Fallback to single city field
+    city = raw.get("city", "")
+    return [city] if city else []
 
 
 def _extract_salary_variants(raw: dict[str, Any]) -> list[dict[str, Any]]:
     """
-    Extract salary information. justjoin.it often has multiple salary
-    variants per listing (e.g., B2B rate and UoP rate on the same posting).
+    Extract salary information from employmentTypes array.
+
+    justjoin.it provides salary in multiple currencies (PLN + conversions).
+    We keep only the original currency (currencySource == "original") and
+    filter out null salary entries.
     """
     variants = []
+    employment_types = raw.get("employmentTypes", [])
 
-    employment_types = raw.get("employmentTypes", raw.get("employment_types", []))
-    if not employment_types:
-        # Single salary structure fallback
-        salary = raw.get("salary", {})
-        if salary:
-            variants.append({
-                "employment_type": raw.get("employment_type", ""),
-                "salary_min": salary.get("from", salary.get("min")),
-                "salary_max": salary.get("to", salary.get("max")),
-                "currency": salary.get("currency", "PLN"),
-                "is_gross": salary.get("isGross", salary.get("is_gross", True)),
-            })
-        return variants
+    for emp in employment_types:
+        # Only keep original currency entries (not conversions)
+        if emp.get("currencySource") != "original":
+            continue
 
-    for emp_type in employment_types:
-        salary = emp_type.get("salary", {})
-        if salary:
-            variants.append({
-                "employment_type": emp_type.get("type", ""),
-                "salary_min": salary.get("from", salary.get("min")),
-                "salary_max": salary.get("to", salary.get("max")),
-                "currency": salary.get("currency", "PLN"),
-                "is_gross": salary.get("isGross", salary.get("is_gross", True)),
-            })
+        salary_from = emp.get("from")
+        salary_to = emp.get("to")
+
+        # Skip entries with no salary disclosed
+        if salary_from is None and salary_to is None:
+            continue
+
+        variants.append({
+            "employment_type": emp.get("type", ""),
+            "salary_min": emp.get("fromPerUnit") or emp.get("from"),
+            "salary_max": emp.get("toPerUnit") or emp.get("to"),
+            "currency": emp.get("currency", "PLN"),
+            "unit": emp.get("unit", "month"),
+            "is_gross": emp.get("gross", True),
+        })
 
     return variants
 
 
-def _extract_skills(raw: dict[str, Any], *keys: str) -> list[str]:
-    """Extract skill tags from one of several possible field names."""
-    for key in keys:
-        value = raw.get(key)
-        if value:
-            if isinstance(value, list):
-                # Could be list of strings or list of dicts
-                return [
-                    s.get("name", s) if isinstance(s, dict) else str(s)
-                    for s in value
-                ]
-    return []
+def _extract_skills(raw: dict[str, Any], key: str) -> list[str]:
+    """Extract skill names from the skills array."""
+    skills = raw.get(key, [])
+    if not skills:
+        return []
+    return [s.get("name", "") for s in skills if isinstance(s, dict) and s.get("name")]
 
 
 def parse_all_listings(
@@ -166,7 +175,7 @@ def parse_all_listings(
     Parse all raw listings into normalized format.
 
     Args:
-        raw_listings: List of raw listing dicts from scraper.
+        raw_listings: List of raw listing dicts from the API.
         run_id: Optional run ID. Generated if not provided.
 
     Returns:

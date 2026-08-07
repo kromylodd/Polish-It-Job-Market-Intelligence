@@ -1,10 +1,16 @@
 """
-Scraper for justjoin.it — fetches job listing pages and extracts
-embedded React Server Component (RSC) flight payloads.
+Scraper for justjoin.it — fetches job listings via the internal JSON API.
 
-justjoin.it is a Next.js App Router site. Job data is embedded in
-<script> tags as RSC flight payloads, not served via a public API.
-Approach: plain HTTP GET + parse embedded JSON from HTML response.
+Discovery: justjoin.it has an internal API at /api/candidate-api/offers
+that returns structured JSON with cursor-based pagination.
+No RSC payload parsing needed — this is a clean REST-like endpoint.
+
+API details (verified 2026-08-07):
+- Endpoint: https://justjoin.it/api/candidate-api/offers
+- Pagination: `from` parameter (offset-based), 10 results per page (hard cap)
+- Filters: categories[]=<key>, experienceLevel[]=<level>, etc.
+- Total results cap: 10,000 (analogous to OLX's 1000-result cap — documented)
+- No auth required for read access
 """
 
 import json
@@ -18,8 +24,10 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://justjoin.it"
-SEARCH_URL = f"{BASE_URL}/job-offers/all-locations/all"
+# API configuration
+BASE_URL = "https://justjoin.it/api/candidate-api/offers"
+RESULTS_PER_PAGE = 10  # Hard-capped by the API, cannot be increased
+MAX_TOTAL_RESULTS = 10_000  # API cap — document this in README like OLX's cap
 
 # Request config
 HEADERS = {
@@ -28,12 +36,11 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept": "application/json",
 }
 
 # Respectful scraping
-REQUEST_DELAY_SECONDS = 2.0
+REQUEST_DELAY_SECONDS = 1.0
 MAX_RETRIES = 3
 RETRY_BACKOFF_FACTOR = 2.0
 
@@ -45,13 +52,41 @@ def create_session() -> requests.Session:
     return session
 
 
-def fetch_page(session: requests.Session, url: str) -> str | None:
-    """Fetch a single page with retries and backoff."""
+def fetch_page(
+    session: requests.Session,
+    from_offset: int = 0,
+    categories: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Fetch a single page of listings from the API.
+
+    Args:
+        session: Requests session.
+        from_offset: Pagination offset.
+        categories: Optional list of category keys to filter by.
+
+    Returns:
+        API response as dict, or None on failure.
+    """
+    params: dict[str, Any] = {
+        "perPage": RESULTS_PER_PAGE,
+        "from": from_offset,
+    }
+
+    # Add category filters
+    if categories:
+        for cat in categories:
+            params.setdefault("categories[]", [])
+            if isinstance(params["categories[]"], list):
+                params["categories[]"].append(cat)
+            else:
+                params["categories[]"] = [params["categories[]"], cat]
+
     for attempt in range(MAX_RETRIES):
         try:
-            response = session.get(url, timeout=30)
+            response = session.get(BASE_URL, params=params, timeout=30)
             response.raise_for_status()
-            return response.text
+            return response.json()
         except requests.RequestException as e:
             wait_time = RETRY_BACKOFF_FACTOR ** attempt
             logger.warning(
@@ -60,78 +95,88 @@ def fetch_page(session: requests.Session, url: str) -> str | None:
             )
             time.sleep(wait_time)
 
-    logger.error(f"Failed to fetch {url} after {MAX_RETRIES} attempts")
+    logger.error(f"Failed to fetch offset {from_offset} after {MAX_RETRIES} attempts")
     return None
 
 
-def extract_rsc_payload(html: str) -> list[dict[str, Any]]:
-    """
-    Extract job listing data from the RSC flight payload embedded in the HTML.
-
-    justjoin.it embeds structured listing data inside <script> tags as part
-    of Next.js RSC (React Server Component) flight format. This function
-    locates and parses that payload.
-
-    TODO: Implement after inspecting a live response to identify the exact
-    script tag pattern and JSON structure. The plan notes this is a genuinely
-    different parsing pattern from Silesia's GraphQL JSON flattening.
-    """
-    # Placeholder — implement after verifying live response structure
-    # Expected approach:
-    # 1. Find <script> tags containing RSC flight data
-    # 2. Parse the flight payload format (typically newline-delimited JSON chunks)
-    # 3. Extract the listing data objects from the parsed payload
-    raise NotImplementedError(
-        "RSC payload extraction not yet implemented. "
-        "Inspect a live justjoin.it response first to identify the exact "
-        "script tag pattern and data structure."
-    )
-
-
 def scrape_listings(
-    max_pages: int = 50,
+    categories: list[str] | None = None,
+    max_listings: int | None = None,
     delay: float = REQUEST_DELAY_SECONDS,
 ) -> list[dict[str, Any]]:
     """
-    Scrape job listings from justjoin.it.
+    Scrape all job listings from justjoin.it API.
 
     Args:
-        max_pages: Maximum number of pages to scrape.
+        categories: Optional category filter (e.g., ["data", "python"]).
+                    If None, scrapes all categories.
+        max_listings: Maximum number of listings to collect. None = all available.
         delay: Delay between requests in seconds (respectful scraping).
 
     Returns:
-        List of raw listing dictionaries.
+        List of raw listing dictionaries from the API.
     """
     session = create_session()
     all_listings: list[dict[str, Any]] = []
 
-    logger.info(f"Starting scrape — max {max_pages} pages, {delay}s delay")
+    effective_max = min(max_listings or MAX_TOTAL_RESULTS, MAX_TOTAL_RESULTS)
+    logger.info(
+        f"Starting scrape — categories={categories}, "
+        f"max_listings={effective_max}, delay={delay}s"
+    )
 
-    # TODO: Implement pagination logic after verifying URL pattern
-    # Expected: justjoin.it uses query params or path segments for pagination
-    # Verify: total listings vs returned listings (OLX cap lesson)
-    page = 1
-    while page <= max_pages:
-        url = f"{SEARCH_URL}?page={page}"  # TODO: verify pagination param
-        logger.info(f"Fetching page {page}: {url}")
+    from_offset = 0
+    total_available = None
 
-        html = fetch_page(session, url)
-        if html is None:
-            logger.error(f"Stopping at page {page} due to fetch failure")
+    while from_offset < effective_max:
+        response_data = fetch_page(session, from_offset=from_offset, categories=categories)
+
+        if response_data is None:
+            logger.error(f"Stopping at offset {from_offset} due to fetch failure")
             break
 
-        listings = extract_rsc_payload(html)
+        listings = response_data.get("data", [])
+        meta = response_data.get("meta", {})
+
+        if total_available is None:
+            total_available = meta.get("totalItems", 0)
+            logger.info(f"API reports {total_available} total items")
+
+            # OLX cap lesson: verify the claimed total is reachable
+            if total_available >= MAX_TOTAL_RESULTS:
+                logger.warning(
+                    f"⚠️ totalItems={total_available} hits the API cap of {MAX_TOTAL_RESULTS}. "
+                    f"Some listings may be inaccessible. Document this limitation."
+                )
+
         if not listings:
-            logger.info(f"No listings found on page {page} — end of results")
+            logger.info(f"No listings at offset {from_offset} — end of results")
             break
 
         all_listings.extend(listings)
-        logger.info(f"Page {page}: extracted {len(listings)} listings (total: {len(all_listings)})")
+        logger.info(
+            f"Offset {from_offset}: fetched {len(listings)} listings "
+            f"(total collected: {len(all_listings)})"
+        )
 
-        page += 1
+        # Check if there's a next page
+        next_info = meta.get("next", {})
+        next_cursor = next_info.get("cursor") if next_info else None
+
+        if next_cursor is None:
+            logger.info("No next cursor — reached end of results")
+            break
+
+        from_offset = next_cursor
+
+        # Stop if we've collected enough
+        if len(all_listings) >= effective_max:
+            logger.info(f"Reached max_listings cap ({effective_max})")
+            break
+
         time.sleep(delay)
 
-    logger.info(f"Scrape complete: {len(all_listings)} total listings")
+    logger.info(f"Scrape complete: {len(all_listings)} total listings collected")
     return all_listings
 
 
@@ -156,6 +201,7 @@ def save_raw_output(listings: list[dict[str, Any]], output_dir: str = "data") ->
     output = {
         "metadata": {
             "source": "justjoin.it",
+            "api_endpoint": BASE_URL,
             "date_collected": datetime.now(timezone.utc).isoformat(),
             "total_listings": len(listings),
         },
@@ -171,6 +217,16 @@ def save_raw_output(listings: list[dict[str, Any]], output_dir: str = "data") ->
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    listings = scrape_listings()
+
+    # Scrape all categories (plan: collect everything, filter at mart level)
+    listings = scrape_listings(
+        categories=None,  # All categories
+        max_listings=None,  # Collect all available (up to API cap)
+        delay=1.0,
+    )
+
     if listings:
-        save_raw_output(listings)
+        filepath = save_raw_output(listings)
+        print(f"Done: {len(listings)} listings saved to {filepath}")
+    else:
+        print("No listings collected")
