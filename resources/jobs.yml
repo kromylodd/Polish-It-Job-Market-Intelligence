@@ -60,8 +60,3 @@ resources:
           notebook_task:
             notebook_path: ../notebooks/04_alert_telegram.py
             source: WORKSPACE
-
-      # Email notification on failure (backup — Telegram alert is primary)
-      email_notifications:
-        on_failure:
-          - ${var.notification_email}
