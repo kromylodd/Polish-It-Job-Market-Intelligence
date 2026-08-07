@@ -104,8 +104,18 @@ class TestExtractSalaryVariants:
     def test_filters_conversion_currency(self):
         raw = {
             "employmentTypes": [
-                {"from": 10000, "fromPerUnit": 10000, "to": 15000, "toPerUnit": 15000, "currency": "PLN", "currencySource": "original", "type": "b2b", "unit": "Month", "gross": False},
-                {"from": 2500, "fromPerUnit": 2500, "to": 3750, "toPerUnit": 3750, "currency": "USD", "currencySource": "conversion", "type": "b2b", "unit": "Month", "gross": False},
+                {
+                    "from": 10000, "fromPerUnit": 10000,
+                    "to": 15000, "toPerUnit": 15000,
+                    "currency": "PLN", "currencySource": "original",
+                    "type": "b2b", "unit": "Month", "gross": False,
+                },
+                {
+                    "from": 2500, "fromPerUnit": 2500,
+                    "to": 3750, "toPerUnit": 3750,
+                    "currency": "USD", "currencySource": "conversion",
+                    "type": "b2b", "unit": "Month", "gross": False,
+                },
             ]
         }
         variants = _extract_salary_variants(raw)
@@ -115,7 +125,12 @@ class TestExtractSalaryVariants:
     def test_skips_null_salary(self):
         raw = {
             "employmentTypes": [
-                {"from": None, "fromPerUnit": None, "to": None, "toPerUnit": None, "currency": "PLN", "currencySource": "original", "type": "permanent", "unit": "month", "gross": True},
+                {
+                    "from": None, "fromPerUnit": None,
+                    "to": None, "toPerUnit": None,
+                    "currency": "PLN", "currencySource": "original",
+                    "type": "permanent", "unit": "month", "gross": True,
+                },
             ]
         }
         assert _extract_salary_variants(raw) == []
@@ -126,7 +141,12 @@ class TestExtractSalaryVariants:
     def test_per_unit_values(self):
         raw = {
             "employmentTypes": [
-                {"from": 27720, "fromPerUnit": 165.0, "to": 31920, "toPerUnit": 190.0, "currency": "PLN", "currencySource": "original", "type": "b2b", "unit": "Hour", "gross": False},
+                {
+                    "from": 27720, "fromPerUnit": 165.0,
+                    "to": 31920, "toPerUnit": 190.0,
+                    "currency": "PLN", "currencySource": "original",
+                    "type": "b2b", "unit": "Hour", "gross": False,
+                },
             ]
         }
         variants = _extract_salary_variants(raw)
