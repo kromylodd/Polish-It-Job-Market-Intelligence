@@ -8,7 +8,6 @@ import pytest
 from scraper.parser import (
     _extract_category,
     _extract_cities,
-    _extract_company_name,
     _extract_salary_variants,
     _extract_skills,
     parse_all_listings,
