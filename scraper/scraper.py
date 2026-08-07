@@ -52,12 +52,7 @@ def fetch_page(
     }
 
     if categories:
-        for cat in categories:
-            params.setdefault("categories[]", [])
-            if isinstance(params["categories[]"], list):
-                params["categories[]"].append(cat)
-            else:
-                params["categories[]"] = [params["categories[]"], cat]
+        params["categories[]"] = list(categories)
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -65,9 +60,10 @@ def fetch_page(
             response.raise_for_status()
             return response.json()
         except requests.RequestException as e:
-            wait_time = RETRY_BACKOFF_FACTOR**attempt
             logger.warning(f"Attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
-            time.sleep(wait_time)
+            # Back off between attempts, but don't sleep after the final one.
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_BACKOFF_FACTOR**attempt)
 
     logger.error(f"Failed to fetch offset {from_offset}")
     return None
@@ -86,7 +82,7 @@ def scrape_listings(
     logger.info(f"Scraping: categories={categories}, max={effective_max}")
 
     from_offset = 0
-    total_available = None
+    total_available: int | None = None
 
     while from_offset < effective_max:
         response_data = fetch_page(session, from_offset=from_offset, categories=categories)
@@ -108,12 +104,16 @@ def scrape_listings(
         all_listings.extend(listings)
         logger.info(f"Offset {from_offset}: +{len(listings)} (total: {len(all_listings)})")
 
-        next_info = meta.get("next", {})
-        next_cursor = next_info.get("cursor") if next_info else None
-        if next_cursor is None or len(all_listings) >= effective_max:
+        # Offset-based pagination: advance by the number of items actually
+        # returned. (The API ignores perPage and hard-caps pages at 10 items,
+        # so we can't assume a fixed stride.)
+        from_offset += len(listings)
+
+        if len(all_listings) >= effective_max:
+            break
+        if total_available and from_offset >= total_available:
             break
 
-        from_offset = next_cursor
         time.sleep(delay)
 
     logger.info(f"Done: {len(all_listings)} listings collected")

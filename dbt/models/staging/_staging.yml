@@ -42,4 +42,4 @@ models:
       - name: workplace_type
         tests:
           - accepted_values:
-              values: ['remote', 'hybrid', 'onsite', 'office']
+              values: ['remote', 'hybrid', 'onsite']

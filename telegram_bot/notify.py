@@ -5,10 +5,13 @@ Queries gold mart via databricks-sql-connector, sends matching listings
 to Telegram. Used when api.telegram.org is unreachable from Databricks.
 """
 
+import html
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import requests
 
@@ -32,13 +35,14 @@ def query_new_listings() -> list[dict]:
 
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    query = f"""
+    # Parameterized query (never interpolate values into SQL directly).
+    query = """
         SELECT listing_id, title, slug, company_name, seniority,
                employment_type, workplace_type, category,
                salary_min, salary_max, currency,
                posted_date, technologies, cities
         FROM job_market.gold.mart_junior_market_snapshot
-        WHERE posted_date >= '{yesterday}'
+        WHERE posted_date >= %(since)s
         ORDER BY posted_date DESC
         LIMIT 50
     """
@@ -49,13 +53,18 @@ def query_new_listings() -> list[dict]:
         access_token=DATABRICKS_TOKEN,
     ) as conn:
         with conn.cursor() as cursor:
-            cursor.execute(query)
+            cursor.execute(query, {"since": yesterday})
             columns = [desc[0] for desc in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
 def format_listing(listing: dict) -> str:
-    """Format listing as Telegram HTML message."""
+    """Format listing as Telegram HTML message.
+
+    All scraped/free-text values are HTML-escaped before being embedded, since
+    the message is sent with parse_mode=HTML. Titles/company names can legally
+    contain characters like & < > that would otherwise break or inject markup.
+    """
     cities = listing.get("cities", "Remote")
     if isinstance(cities, list):
         cities = ", ".join(cities) if cities else "Remote"
@@ -74,13 +83,17 @@ def format_listing(listing: dict) -> str:
         )
 
     slug = listing.get("slug", "")
-    link = f"\nhttps://justjoin.it/offers/{slug}" if slug else ""
+    # slug is used to build a URL, not embedded as HTML text — quote it defensively.
+    link = f"\nhttps://justjoin.it/offers/{quote(str(slug), safe='')}" if slug else ""
+
+    def esc(value: object) -> str:
+        return html.escape(str(value))
 
     return (
-        f"<b>{listing['title']}</b>\n"
-        f"{listing.get('company_name', '')} | {cities} | {listing.get('workplace_type', '')}\n"
-        f"{salary_str}\n"
-        f"{techs}{link}"
+        f"<b>{esc(listing.get('title', ''))}</b>\n"
+        f"{esc(listing.get('company_name', ''))} | {esc(cities)} | {esc(listing.get('workplace_type', ''))}\n"
+        f"{esc(salary_str)}\n"
+        f"{esc(techs)}{link}"
     )
 
 
@@ -123,6 +136,9 @@ def main():
     for listing in listings[:20]:
         if send_message(format_listing(listing)):
             sent += 1
+        # Telegram allows ~30 msg/s overall but throttles bursts per chat.
+        # A small delay keeps us well under the limit and avoids 429s.
+        time.sleep(0.5)
 
     logger.info(f"Sent {sent}/{len(listings)} notifications")
 

@@ -14,38 +14,64 @@ SILVER_TECH_TABLE = "job_market.silver.listings_with_tech"
 
 # Variant -> canonical mapping. Kept in sync with dbt/seeds/technology_lookup.csv.
 TECH_ALIASES: dict[str, str] = {
-    "python": "Python", "python3": "Python", "py": "Python",
-    "javascript": "JavaScript", "js": "JavaScript",
-    "typescript": "TypeScript", "ts": "TypeScript",
-    "react": "React", "react.js": "React", "reactjs": "React",
-    "node": "Node.js", "node.js": "Node.js", "nodejs": "Node.js",
-    "sql": "SQL", "t-sql": "SQL", "pl/sql": "SQL",
-    "spark": "Apache Spark", "apache spark": "Apache Spark", "pyspark": "Apache Spark",
-    "airflow": "Apache Airflow", "apache airflow": "Apache Airflow",
-    "kafka": "Apache Kafka", "apache kafka": "Apache Kafka",
-    "dbt": "dbt", "data build tool": "dbt",
-    "aws": "AWS", "amazon web services": "AWS",
-    "gcp": "GCP", "google cloud": "GCP", "google cloud platform": "GCP",
-    "azure": "Azure", "microsoft azure": "Azure",
-    "postgresql": "PostgreSQL", "postgres": "PostgreSQL",
+    "python": "Python",
+    "python3": "Python",
+    "py": "Python",
+    "javascript": "JavaScript",
+    "js": "JavaScript",
+    "typescript": "TypeScript",
+    "ts": "TypeScript",
+    "react": "React",
+    "react.js": "React",
+    "reactjs": "React",
+    "node": "Node.js",
+    "node.js": "Node.js",
+    "nodejs": "Node.js",
+    "sql": "SQL",
+    "t-sql": "SQL",
+    "pl/sql": "SQL",
+    "spark": "Apache Spark",
+    "apache spark": "Apache Spark",
+    "pyspark": "Apache Spark",
+    "airflow": "Apache Airflow",
+    "apache airflow": "Apache Airflow",
+    "kafka": "Apache Kafka",
+    "apache kafka": "Apache Kafka",
+    "dbt": "dbt",
+    "data build tool": "dbt",
+    "aws": "AWS",
+    "amazon web services": "AWS",
+    "gcp": "GCP",
+    "google cloud": "GCP",
+    "google cloud platform": "GCP",
+    "azure": "Azure",
+    "microsoft azure": "Azure",
+    "postgresql": "PostgreSQL",
+    "postgres": "PostgreSQL",
     "mysql": "MySQL",
-    "mongodb": "MongoDB", "mongo": "MongoDB",
+    "mongodb": "MongoDB",
+    "mongo": "MongoDB",
     "redis": "Redis",
     "docker": "Docker",
-    "kubernetes": "Kubernetes", "k8s": "Kubernetes",
+    "kubernetes": "Kubernetes",
+    "k8s": "Kubernetes",
     "terraform": "Terraform",
     "git": "Git",
     "java": "Java",
     "scala": "Scala",
-    "go": "Go", "golang": "Go",
+    "go": "Go",
+    "golang": "Go",
     "databricks": "Databricks",
-    "power bi": "Power BI", "powerbi": "Power BI",
+    "power bi": "Power BI",
+    "powerbi": "Power BI",
     "tableau": "Tableau",
     "linux": "Linux",
 }
 
 CANONICAL_TECHS = set(TECH_ALIASES.values())
-TECH_PATTERNS = {tech: re.compile(rf"\b{re.escape(tech)}\b", re.IGNORECASE) for tech in CANONICAL_TECHS}
+TECH_PATTERNS = {
+    tech: re.compile(rf"\b{re.escape(tech)}\b", re.IGNORECASE) for tech in CANONICAL_TECHS
+}
 
 broadcast_aliases = spark.sparkContext.broadcast(TECH_ALIASES)
 broadcast_patterns = spark.sparkContext.broadcast({k: v.pattern for k, v in TECH_PATTERNS.items()})
@@ -75,8 +101,7 @@ def extract_techs_from_description(description: str) -> list[str]:
 silver_df = spark.table(SILVER_TABLE)
 
 tech_df = (
-    silver_df
-    .withColumn("canonical_required_skills", canonicalize_skills(col("required_skills")))
+    silver_df.withColumn("canonical_required_skills", canonicalize_skills(col("required_skills")))
     .withColumn("canonical_nice_to_have_skills", canonicalize_skills(col("nice_to_have_skills")))
     .withColumn("description_techs", extract_techs_from_description(col("description")))
     .withColumn(
@@ -92,8 +117,7 @@ tech_df = (
 )
 
 (
-    tech_df.write
-    .format("delta")
+    tech_df.write.format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
     .saveAsTable(SILVER_TECH_TABLE)

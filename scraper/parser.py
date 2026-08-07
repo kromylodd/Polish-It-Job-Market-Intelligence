@@ -5,8 +5,8 @@ Normalizes raw API listings into a flat schema for the bronze layer.
 Filters salary to original currency only, extracts per-unit rates.
 """
 
-import hashlib
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,7 +27,7 @@ def parse_listing(raw: dict[str, Any], run_id: str) -> dict[str, Any] | None:
             "title": raw.get("title", ""),
             "apply_url": raw.get("applyUrl", ""),
             "apply_method": raw.get("applyMethod", ""),
-            "company_name": _extract_company_name(raw),
+            "company_name": raw.get("companyName", ""),
             "category": _extract_category(raw),
             "seniority": raw.get("experienceLevel", ""),
             "workplace_type": raw.get("workplaceType", ""),
@@ -37,6 +37,7 @@ def parse_listing(raw: dict[str, Any], run_id: str) -> dict[str, Any] | None:
             "required_skills": _extract_skills(raw, "requiredSkills"),
             "nice_to_have_skills": _extract_skills(raw, "niceToHaveSkills"),
             "languages": raw.get("languages", []),
+            "description": _extract_description(raw),
             "posted_date": raw.get("publishedAt", ""),
             "last_published_date": raw.get("lastPublishedAt", ""),
             "expiry_date": raw.get("expiredAt", ""),
@@ -52,8 +53,18 @@ def parse_listing(raw: dict[str, Any], run_id: str) -> dict[str, Any] | None:
         return None
 
 
-def _extract_company_name(raw: dict[str, Any]) -> str:
-    return raw.get("companyName", "")
+def _extract_description(raw: dict[str, Any]) -> str:
+    """Extract the free-text job description.
+
+    justjoin.it has used several keys for the body over time; check the common
+    ones in order. Kept non-empty so downstream description-based tech
+    extraction (03_silver_tech_parse) actually has text to work with.
+    """
+    for key in ("description", "body", "descriptionText"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
 
 
 def _extract_category(raw: dict[str, Any]) -> str:
@@ -80,14 +91,16 @@ def _extract_salary_variants(raw: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if emp.get("from") is None and emp.get("to") is None:
             continue
-        variants.append({
-            "employment_type": emp.get("type", ""),
-            "salary_min": emp.get("fromPerUnit") or emp.get("from"),
-            "salary_max": emp.get("toPerUnit") or emp.get("to"),
-            "currency": emp.get("currency", "PLN"),
-            "unit": emp.get("unit", "month"),
-            "is_gross": emp.get("gross", True),
-        })
+        variants.append(
+            {
+                "employment_type": emp.get("type", ""),
+                "salary_min": emp.get("fromPerUnit") or emp.get("from"),
+                "salary_max": emp.get("toPerUnit") or emp.get("to"),
+                "currency": emp.get("currency", "PLN"),
+                "unit": emp.get("unit", "month"),
+                "is_gross": emp.get("gross", True),
+            }
+        )
     return variants
 
 
@@ -105,9 +118,7 @@ def parse_all_listings(
 ) -> list[dict[str, Any]]:
     """Parse batch of listings. Skips unparseable ones."""
     if run_id is None:
-        run_id = hashlib.md5(
-            datetime.now(timezone.utc).isoformat().encode()
-        ).hexdigest()[:12]
+        run_id = uuid.uuid4().hex[:12]
 
     parsed = []
     failed = 0

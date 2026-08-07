@@ -8,6 +8,7 @@ import pytest
 from scraper.parser import (
     _extract_category,
     _extract_cities,
+    _extract_description,
     _extract_salary_variants,
     _extract_skills,
     parse_all_listings,
@@ -104,16 +105,26 @@ class TestExtractSalaryVariants:
         raw = {
             "employmentTypes": [
                 {
-                    "from": 10000, "fromPerUnit": 10000,
-                    "to": 15000, "toPerUnit": 15000,
-                    "currency": "PLN", "currencySource": "original",
-                    "type": "b2b", "unit": "Month", "gross": False,
+                    "from": 10000,
+                    "fromPerUnit": 10000,
+                    "to": 15000,
+                    "toPerUnit": 15000,
+                    "currency": "PLN",
+                    "currencySource": "original",
+                    "type": "b2b",
+                    "unit": "Month",
+                    "gross": False,
                 },
                 {
-                    "from": 2500, "fromPerUnit": 2500,
-                    "to": 3750, "toPerUnit": 3750,
-                    "currency": "USD", "currencySource": "conversion",
-                    "type": "b2b", "unit": "Month", "gross": False,
+                    "from": 2500,
+                    "fromPerUnit": 2500,
+                    "to": 3750,
+                    "toPerUnit": 3750,
+                    "currency": "USD",
+                    "currencySource": "conversion",
+                    "type": "b2b",
+                    "unit": "Month",
+                    "gross": False,
                 },
             ]
         }
@@ -125,10 +136,15 @@ class TestExtractSalaryVariants:
         raw = {
             "employmentTypes": [
                 {
-                    "from": None, "fromPerUnit": None,
-                    "to": None, "toPerUnit": None,
-                    "currency": "PLN", "currencySource": "original",
-                    "type": "permanent", "unit": "month", "gross": True,
+                    "from": None,
+                    "fromPerUnit": None,
+                    "to": None,
+                    "toPerUnit": None,
+                    "currency": "PLN",
+                    "currencySource": "original",
+                    "type": "permanent",
+                    "unit": "month",
+                    "gross": True,
                 },
             ]
         }
@@ -141,10 +157,15 @@ class TestExtractSalaryVariants:
         raw = {
             "employmentTypes": [
                 {
-                    "from": 27720, "fromPerUnit": 165.0,
-                    "to": 31920, "toPerUnit": 190.0,
-                    "currency": "PLN", "currencySource": "original",
-                    "type": "b2b", "unit": "Hour", "gross": False,
+                    "from": 27720,
+                    "fromPerUnit": 165.0,
+                    "to": 31920,
+                    "toPerUnit": 190.0,
+                    "currency": "PLN",
+                    "currencySource": "original",
+                    "type": "b2b",
+                    "unit": "Hour",
+                    "gross": False,
                 },
             ]
         }
@@ -163,6 +184,22 @@ class TestExtractSkills:
 
     def test_missing_key(self):
         assert _extract_skills({}, "requiredSkills") == []
+
+
+class TestExtractDescription:
+    def test_description_key(self):
+        assert _extract_description({"description": "We use Python and Spark."}) == (
+            "We use Python and Spark."
+        )
+
+    def test_body_fallback(self):
+        assert _extract_description({"body": "Airflow + dbt stack"}) == "Airflow + dbt stack"
+
+    def test_missing_returns_empty(self):
+        assert _extract_description({}) == ""
+
+    def test_blank_returns_empty(self):
+        assert _extract_description({"description": "   "}) == ""
 
 
 class TestExtractCategory:

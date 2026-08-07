@@ -28,7 +28,6 @@ jobs:
 
       - name: Format check
         run: ruff format --check .
-        continue-on-error: true
 
       - name: Tests
         run: pytest scraper/tests/ -v --tb=short
