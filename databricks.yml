@@ -13,3 +13,5 @@ targets:
 
   prod:
     mode: production
+    workspace:
+      root_path: /Workspace/Users/danilk.demdov@gmail.com/.bundle/${bundle.name}/${bundle.target}
