@@ -39,18 +39,15 @@ jobs:
           echo "Uploading: $LATEST_FILE"
           python -m scraper.uploader "$LATEST_FILE"
 
-      # Fallback: trigger Databricks Workflow via API if file-arrival trigger
-      # is not available on Free Edition
-      - name: Trigger Databricks Workflow (fallback)
+      # Fallback: trigger Databricks Workflow via API since file-arrival
+      # triggers don't work on Free Edition.
+      - name: Trigger Databricks Workflow
         if: success()
         run: |
-          # Only needed if file-arrival triggers don't work on Free Edition
-          # Uncomment the curl below if you need API-triggered runs:
-          # curl -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
-          #   -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
-          #   -H "Content-Type: application/json" \
-          #   -d '{"job_id": <YOUR_JOB_ID>}'
-          echo "File uploaded — relying on file-arrival trigger"
+          curl -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
+            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"job_id": 364503100278093}'
 
   # Telegram notifications (runs after pipeline completes)
   notify:
@@ -78,7 +75,7 @@ jobs:
         run: pip install requests databricks-sql-connector
 
       - name: Wait for pipeline
-        run: sleep 900  # 15 min buffer — adjust based on actual pipeline duration
+        run: sleep 300  # 5 min — pipeline typically completes in ~4 min
 
       - name: Send Telegram notifications
         run: python -m telegram_bot.notify
