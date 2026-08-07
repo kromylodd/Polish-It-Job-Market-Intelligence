@@ -11,8 +11,8 @@ resources:
       # Fallback: triggered via Jobs API run-now from GitHub Actions
       trigger:
         file_arrival:
-          url: /Volumes/job_market/bronze/raw_listings
-          min_time_between_triggers_seconds: 600  # 10 min debounce
+          url: /Volumes/job_market/bronze/raw_listings/
+          min_time_between_triggers_seconds: 600
 
       tasks:
         - task_key: bronze_ingest
