@@ -1,0 +1,32 @@
+canonical_name,tech_category
+Python,Language
+JavaScript,Language
+TypeScript,Language
+Java,Language
+Scala,Language
+Go,Language
+SQL,Language
+React,Framework
+Node.js,Framework
+Apache Spark,Framework
+Apache Airflow,Framework
+Apache Kafka,Framework
+dbt,Tool
+Docker,Tool
+Kubernetes,Tool
+Terraform,Tool
+Git,Tool
+CI/CD,Tool
+AWS,Cloud
+GCP,Cloud
+Azure,Cloud
+Databricks,Cloud
+PostgreSQL,Database
+MySQL,Database
+MongoDB,Database
+Redis,Database
+Power BI,Tool
+Tableau,Tool
+Linux,Tool
+GitHub,Tool
+GitLab,Tool

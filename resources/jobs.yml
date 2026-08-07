@@ -1,0 +1,67 @@
+# Databricks Workflow (Lakeflow Job) definition
+# Pipeline: bronze → silver → gold (dbt) → test → alert
+
+resources:
+  jobs:
+    job_market_pipeline:
+      name: "job_market_pipeline"
+      description: "Daily pipeline: ingest raw listings → bronze → silver → gold star schema → alerts"
+
+      # File arrival trigger on the raw Volume (primary)
+      # Fallback: triggered via Jobs API run-now from GitHub Actions
+      trigger:
+        file_arrival:
+          url: /Volumes/job_market/bronze/raw_listings
+          min_time_between_triggers_seconds: 600  # 10 min debounce
+
+      tasks:
+        - task_key: bronze_ingest
+          description: "Read new files from Volume → Delta bronze table (append-only)"
+          notebook_task:
+            notebook_path: ../notebooks/01_bronze_ingest.py
+            source: WORKSPACE
+
+        - task_key: silver_clean
+          description: "Dedupe, type-cast, standardize"
+          depends_on:
+            - task_key: bronze_ingest
+          notebook_task:
+            notebook_path: ../notebooks/02_silver_clean.py
+            source: WORKSPACE
+
+        - task_key: silver_tech_parse
+          description: "Regex/NLP tech-stack + skill canonicalization"
+          depends_on:
+            - task_key: silver_clean
+          notebook_task:
+            notebook_path: ../notebooks/03_silver_tech_parse.py
+            source: WORKSPACE
+
+        - task_key: dbt_build
+          description: "dbt build: staging → dims/fact/bridges → marts"
+          depends_on:
+            - task_key: silver_tech_parse
+          notebook_task:
+            notebook_path: ../notebooks/run_dbt.py
+            source: WORKSPACE
+
+        - task_key: dbt_test
+          description: "dbt test: data quality gate"
+          depends_on:
+            - task_key: dbt_build
+          notebook_task:
+            notebook_path: ../notebooks/run_dbt_test.py
+            source: WORKSPACE
+
+        - task_key: alert_telegram
+          description: "Send Telegram notifications for new matching listings"
+          depends_on:
+            - task_key: dbt_test
+          notebook_task:
+            notebook_path: ../notebooks/04_alert_telegram.py
+            source: WORKSPACE
+
+      # Email notification on failure (backup — Telegram alert is primary)
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}

@@ -1,0 +1,45 @@
+version: 2
+
+sources:
+  - name: silver
+    schema: silver
+    database: job_market
+    tables:
+      - name: listings_with_tech
+        description: "PySpark-materialized silver table with canonicalized tech skills"
+        columns:
+          - name: listing_id
+            description: "Unique listing identifier from justjoin.it"
+            tests:
+              - not_null
+          - name: title
+            tests:
+              - not_null
+          - name: company_name
+            tests:
+              - not_null
+
+models:
+  - name: stg_listings
+    description: "Staged listings with surrogate keys and final standardization for gold layer"
+    columns:
+      - name: listing_sk
+        description: "Surrogate key (hash of listing_id + date_collected)"
+        tests:
+          - unique
+          - not_null
+      - name: listing_id
+        description: "Natural key from justjoin.it"
+        tests:
+          - unique
+          - not_null
+      - name: category
+        tests:
+          - not_null
+      - name: seniority
+        tests:
+          - not_null
+      - name: workplace_type
+        tests:
+          - accepted_values:
+              values: ['remote', 'hybrid', 'onsite', 'office']

@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Databricks
+.databricks/
+*.whl
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/profiles.yml
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Data files (don't commit raw scraped data)
+data/
+*.json
+!scraper/tests/sample_raw_listing.json
+!dbt/seeds/*.csv

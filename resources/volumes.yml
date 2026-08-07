@@ -1,0 +1,27 @@
+# Unity Catalog Volume definitions
+# Raw landing zone for scraped JSON files uploaded from GitHub Actions
+
+resources:
+  schemas:
+    bronze:
+      name: bronze
+      catalog_name: job_market
+      comment: "Raw ingested data — append-only, no transformation"
+
+    silver:
+      name: silver
+      catalog_name: job_market
+      comment: "Cleaned, deduplicated, tech-parsed listings"
+
+    gold:
+      name: gold
+      catalog_name: job_market
+      comment: "Star schema: dims, fact, bridges, analytical marts"
+
+  volumes:
+    raw_listings:
+      catalog_name: job_market
+      schema_name: bronze
+      name: raw_listings
+      volume_type: MANAGED
+      comment: "Landing zone for raw JSON files uploaded by GitHub Actions scraper"

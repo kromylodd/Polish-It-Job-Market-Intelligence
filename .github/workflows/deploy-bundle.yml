@@ -1,0 +1,37 @@
+name: Deploy Bundle
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "dbt/**"
+      - "notebooks/**"
+      - "resources/**"
+      - "scraper/**"
+      - "databricks.yml"
+  workflow_dispatch: # Manual dispatch for path-filter edge cases
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+      - name: Validate bundle
+        run: databricks bundle validate -t prod
+
+      - name: Deploy bundle
+        run: databricks bundle deploy -t prod
+
+      - name: Verify deployment
+        run: |
+          echo "Bundle deployed successfully to prod target"
+          databricks bundle summary -t prod

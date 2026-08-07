@@ -1,0 +1,4 @@
+# Scraper runtime dependencies (used in GitHub Actions)
+requests==2.32.3
+beautifulsoup4==4.12.3
+databricks-sdk==0.30.0

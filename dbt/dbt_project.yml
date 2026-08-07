@@ -1,0 +1,47 @@
+name: job_market_dbt
+version: "1.0.0"
+
+config-version: 2
+
+profile: job_market
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  job_market_dbt:
+    staging:
+      +schema: silver
+      +materialized: view
+    intermediate:
+      +schema: silver
+      +materialized: view
+    marts:
+      dims:
+        +schema: gold
+        +materialized: table
+      facts:
+        +schema: gold
+        +materialized: table
+      bridges:
+        +schema: gold
+        +materialized: table
+      analytics:
+        +schema: gold
+        +materialized: table
+
+seeds:
+  job_market_dbt:
+    +schema: gold
+
+snapshots:
+  job_market_dbt:
+    +schema: gold

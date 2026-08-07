@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -r scraper/requirements.txt
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Format check with black
+        run: black --check .
+
+      - name: Run pytest (scraper + parser)
+        run: pytest scraper/tests/ -v --tb=short
+
+      - name: dbt parse (syntax/ref validation)
+        working-directory: dbt
+        env:
+          # dbt parse only checks Jinja/YAML/refs — no live connection needed
+          DBT_PROFILES_DIR: .
+        run: |
+          dbt deps
+          dbt parse

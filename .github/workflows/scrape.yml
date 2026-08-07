@@ -1,0 +1,84 @@
+name: Daily Scrape
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC (08:00 Warsaw time)
+    - cron: "0 6 * * *"
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  scrape-and-upload:
+    runs-on: ubuntu-latest
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Run scraper
+        run: python -m scraper.scraper
+
+      - name: Upload to Databricks Volume
+        run: |
+          # Upload the latest raw JSON file to Unity Catalog Volume
+          LATEST_FILE=$(ls -t data/raw_listings_*.json 2>/dev/null | head -1)
+          if [ -z "$LATEST_FILE" ]; then
+            echo "No output file found — scraper may have failed"
+            exit 1
+          fi
+          echo "Uploading: $LATEST_FILE"
+          python -m scraper.uploader "$LATEST_FILE"
+
+      # Fallback: trigger Databricks Workflow via API if file-arrival trigger
+      # is not available on Free Edition
+      - name: Trigger Databricks Workflow (fallback)
+        if: success()
+        run: |
+          # Only needed if file-arrival triggers don't work on Free Edition
+          # Uncomment the curl below if you need API-triggered runs:
+          # curl -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
+          #   -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+          #   -H "Content-Type: application/json" \
+          #   -d '{"job_id": <YOUR_JOB_ID>}'
+          echo "File uploaded — relying on file-arrival trigger"
+
+  # Telegram notifications (runs after pipeline completes)
+  notify:
+    runs-on: ubuntu-latest
+    needs: scrape-and-upload
+    # Add a delay to wait for Databricks pipeline to finish
+    # TODO: Replace with a proper wait/poll mechanism once pipeline timing is known
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_WAREHOUSE_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests databricks-sql-connector
+
+      - name: Wait for pipeline
+        run: sleep 900  # 15 min buffer — adjust based on actual pipeline duration
+
+      - name: Send Telegram notifications
+        run: python -m telegram_bot.notify

@@ -1,0 +1,45 @@
+{
+  "id": "test-listing-001",
+  "slug": "junior-data-engineer-at-example-corp",
+  "title": "Junior Data Engineer",
+  "companyName": "Example Corp",
+  "category": "Data",
+  "experienceLevel": "junior",
+  "workplaceType": "remote",
+  "multilocation": [
+    {"city": "Warszawa"},
+    {"city": "Kraków"}
+  ],
+  "employmentTypes": [
+    {
+      "type": "b2b",
+      "salary": {
+        "from": 8000,
+        "to": 14000,
+        "currency": "PLN",
+        "isGross": false
+      }
+    },
+    {
+      "type": "permanent",
+      "salary": {
+        "from": 6500,
+        "to": 11000,
+        "currency": "PLN",
+        "isGross": true
+      }
+    }
+  ],
+  "requiredSkills": [
+    {"name": "Python", "level": 3},
+    {"name": "SQL", "level": 4},
+    {"name": "Apache Spark", "level": 2}
+  ],
+  "niceToHaveSkills": [
+    {"name": "dbt"},
+    {"name": "Airflow"}
+  ],
+  "body": "<p>We are looking for a Junior Data Engineer to join our team. You will work with Python, PySpark, and Databricks. Experience with AWS or Azure is a plus. Knowledge of Docker and Kubernetes is nice to have.</p>",
+  "publishedAt": "2026-08-06T10:00:00Z",
+  "expiresAt": "2026-09-06T10:00:00Z"
+}
