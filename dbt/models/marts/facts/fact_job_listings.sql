@@ -21,13 +21,13 @@ listings_exploded as (
         l.workplace_type,
         l.posted_date,
         l.date_collected,
-        sv.employment_type,
-        sv.salary_min,
-        sv.salary_max,
-        sv.currency,
-        sv.is_gross
+        sv.col.employment_type,
+        sv.col.salary_min,
+        sv.col.salary_max,
+        sv.col.currency,
+        sv.col.is_gross
     from listings l
-    lateral view explode(l.salary_variants) sv as employment_type, salary_min, salary_max, currency, is_gross
+    lateral view explode(l.salary_variants) sv
 ),
 
 final as (

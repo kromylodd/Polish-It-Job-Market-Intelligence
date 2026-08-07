@@ -3,7 +3,7 @@
 # Uses Auto Loader (cloudFiles) for incremental file discovery.
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, current_timestamp, explode, input_file_name
+from pyspark.sql.functions import col, current_timestamp, explode
 from pyspark.sql.types import (
     ArrayType,
     BooleanType,
@@ -89,7 +89,7 @@ raw_df = (
 listings_df = raw_df.select(
     col("metadata.date_collected").alias("file_date_collected"),
     col("metadata.source").alias("source"),
-    input_file_name().alias("source_file"),
+    col("_metadata.file_path").alias("source_file"),
     explode(col("listings")).alias("listing"),
 ).select(
     col("listing.*"),

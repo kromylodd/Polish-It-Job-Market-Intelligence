@@ -147,6 +147,13 @@ def save_raw_output(listings: list[dict[str, Any]], output_dir: str = "data") ->
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    listings = scrape_listings()
-    if listings:
-        save_raw_output(listings)
+    from scraper.parser import parse_all_listings
+
+    raw_listings = scrape_listings()
+    if raw_listings:
+        # Parse raw API data into the normalized schema that matches the bronze
+        # ingest schema. The raw API uses different field names (guid/companyName/etc.)
+        # and the bronze layer expects parsed output (listing_id/company_name/etc.).
+        parsed = parse_all_listings(raw_listings)
+        logger.info(f"Parsed {len(parsed)}/{len(raw_listings)} listings")
+        save_raw_output(parsed)

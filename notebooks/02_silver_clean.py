@@ -12,6 +12,10 @@ SILVER_TABLE = "job_market.silver.stg_listings"
 bronze_df = spark.table(BRONZE_TABLE)
 print(f"Bronze: {bronze_df.count()} rows")
 
+# Safety: drop any conflicting view left by dbt migrations (stg_listings was
+# briefly materialized as a view before switching to ephemeral).
+spark.sql(f"DROP VIEW IF EXISTS {SILVER_TABLE}")
+
 # Deduplicate: keep latest per listing_id
 window = Window.partitionBy("listing_id").orderBy(col("date_collected").desc())
 deduped_df = (

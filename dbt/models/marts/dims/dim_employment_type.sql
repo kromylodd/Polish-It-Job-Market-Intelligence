@@ -7,10 +7,10 @@
 
 with employment_types as (
     select distinct
-        sv.employment_type as type
+        sv.col.employment_type as type
     from {{ ref('stg_listings') }} l
-    lateral view explode(l.salary_variants) sv as employment_type, salary_min, salary_max, currency, is_gross
-    where sv.employment_type is not null and sv.employment_type != ''
+    lateral view explode(l.salary_variants) sv
+    where sv.col.employment_type is not null and sv.col.employment_type != ''
 )
 
 select

@@ -20,7 +20,7 @@ models:
   job_market_dbt:
     staging:
       +schema: silver
-      +materialized: view
+      +materialized: ephemeral
     intermediate:
       +schema: silver
       +materialized: view

@@ -73,18 +73,18 @@ TECH_PATTERNS = {
     tech: re.compile(rf"\b{re.escape(tech)}\b", re.IGNORECASE) for tech in CANONICAL_TECHS
 }
 
-broadcast_aliases = spark.sparkContext.broadcast(TECH_ALIASES)
-broadcast_patterns = spark.sparkContext.broadcast({k: v.pattern for k, v in TECH_PATTERNS.items()})
+# Note: SparkContext.broadcast() is not available on serverless compute (Free Edition).
+# Module-level dicts are serialized into UDF closures automatically — same effect,
+# just without the manual broadcast optimization (fine for a lookup table this small).
 
 
 @udf(returnType=ArrayType(StringType()))
 def canonicalize_skills(skills: list[str]) -> list[str]:
     if not skills:
         return []
-    aliases = broadcast_aliases.value
     result = set()
     for s in skills:
-        canonical = aliases.get(s.strip().lower())
+        canonical = TECH_ALIASES.get(s.strip().lower())
         result.add(canonical if canonical else s.strip())
     return list(result)
 
@@ -93,8 +93,7 @@ def canonicalize_skills(skills: list[str]) -> list[str]:
 def extract_techs_from_description(description: str) -> list[str]:
     if not description:
         return []
-    patterns = broadcast_patterns.value
-    return [name for name, pat in patterns.items() if re.search(pat, description, re.IGNORECASE)]
+    return [name for name, pat in TECH_PATTERNS.items() if pat.search(description)]
 
 
 # Apply
