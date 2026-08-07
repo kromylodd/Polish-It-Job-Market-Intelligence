@@ -10,10 +10,6 @@ targets:
   dev:
     mode: development
     default: true
-    workspace:
-      root_path: /Users/${workspace.current_user.user_name}/.bundle/${bundle.name}/dev
 
   prod:
     mode: production
-    workspace:
-      root_path: /Users/${workspace.current_user.user_name}/.bundle/${bundle.name}/prod
