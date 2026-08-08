@@ -18,7 +18,7 @@ import logging
 import os
 from pathlib import Path
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -33,10 +33,72 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 # For a single-user bot this is sufficient; for multi-user, move to a DB.
 CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
+# Expanded default technology filters grouped by category
+TECH_CATEGORIES = {
+    "🐍 Languages": ["Python", "SQL", "Java", "Scala", "Go", "TypeScript"],
+    "📊 Data & Analytics": [
+        "Apache Spark",
+        "Apache Kafka",
+        "Apache Airflow",
+        "dbt",
+        "Pandas",
+        "PySpark",
+    ],
+    "☁️ Cloud & Infra": [
+        "AWS",
+        "Azure",
+        "GCP",
+        "Docker",
+        "Kubernetes",
+        "Terraform",
+    ],
+    "🗄️ Databases": [
+        "PostgreSQL",
+        "MongoDB",
+        "Redis",
+        "Elasticsearch",
+        "Snowflake",
+        "Databricks",
+    ],
+    "🤖 ML & AI": [
+        "TensorFlow",
+        "PyTorch",
+        "MLflow",
+        "scikit-learn",
+        "LLM",
+        "OpenAI",
+    ],
+}
+
+# Flat list of all known techs for validation hints
+ALL_KNOWN_TECHS = [tech for techs in TECH_CATEGORIES.values() for tech in techs]
+
 DEFAULT_CONFIG = {
     "seniorities": ["junior", "mid"],
-    "technologies": ["Python", "SQL", "Apache Spark", "dbt", "Apache Airflow"],
+    "technologies": [
+        "Python",
+        "SQL",
+        "Apache Spark",
+        "dbt",
+        "Apache Airflow",
+        "Docker",
+        "AWS",
+        "PostgreSQL",
+        "Pandas",
+        "Kafka",
+    ],
 }
+
+# Command menu shown next to the send button
+BOT_COMMANDS = [
+    BotCommand("start", "Welcome + overview"),
+    BotCommand("filters", "View current alert filters"),
+    BotCommand("seniority", "Set seniority filter"),
+    BotCommand("tech", "Set technology filter"),
+    BotCommand("latest", "Get recent matching listings"),
+    BotCommand("stats", "Pipeline statistics"),
+    BotCommand("help", "Show all commands"),
+]
 
 
 def load_config() -> dict:
@@ -62,13 +124,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 <b>Polish IT Job Market Intelligence</b>\n\n"
         "I send you daily alerts for IT job listings matching your filters "
         "(seniority, technologies) from justjoin.it.\n\n"
-        "Commands:\n"
-        "/filters — view your current alert settings\n"
-        "/seniority — change seniority filter\n"
-        "/tech — change technology filter\n"
-        "/latest — get recent matching listings now\n"
-        "/stats — pipeline statistics\n"
-        "/help — show all commands"
+        "<b>Commands:</b>\n"
+        "📋 /filters — view your current alert settings\n"
+        "🎯 /seniority — change seniority filter\n"
+        "💻 /tech — change technology filter\n"
+        "🔍 /latest — get recent matching listings now\n"
+        "📊 /stats — pipeline statistics\n"
+        "❓ /help — show all commands"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -77,30 +139,49 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command."""
     text = (
         "<b>Available commands:</b>\n\n"
-        "/start — welcome + overview\n"
-        "/filters — show current filter settings\n"
-        "/seniority &lt;levels&gt; — set seniority filter\n"
-        "  <i>e.g. /seniority junior mid senior</i>\n"
-        "/tech &lt;technologies&gt; — set technology filter\n"
-        "  <i>e.g. /tech Python SQL dbt Airflow</i>\n"
-        "/latest — fetch most recent matching listings\n"
-        "/stats — pipeline & alert statistics\n"
-        "/help — this message\n\n"
+        "📋 /filters — show current filter settings\n\n"
+        "🎯 /seniority &lt;levels&gt; — set seniority filter\n"
+        "   <i>e.g. /seniority junior mid senior</i>\n\n"
+        "💻 /tech &lt;technologies&gt; — set technology filter\n"
+        "   <i>e.g. /tech Python SQL dbt Airflow</i>\n"
+        "   <i>Use /tech list to see all known technologies</i>\n\n"
+        "🔍 /latest — fetch most recent matching listings\n\n"
+        "📊 /stats — pipeline &amp; alert statistics\n\n"
         "Filters affect both daily alerts and /latest results."
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /filters command — show current settings."""
+    """Handle /filters command — show current settings with nice grouping."""
     config = load_config()
-    seniorities = ", ".join(config.get("seniorities", []))
-    technologies = ", ".join(config.get("technologies", []))
+    seniorities = config.get("seniorities", [])
+    technologies = config.get("technologies", [])
+
+    # Format seniorities with emoji
+    sen_display = " · ".join(s.capitalize() for s in seniorities) if seniorities else "Any"
+
+    # Group technologies by category for display
+    tech_lines = []
+    matched_techs = set()
+    for category, techs in TECH_CATEGORIES.items():
+        active = [t for t in techs if t in technologies]
+        if active:
+            tech_lines.append(f"  {category}: {', '.join(active)}")
+            matched_techs.update(active)
+
+    # Any techs not in known categories
+    uncategorized = [t for t in technologies if t not in matched_techs]
+    if uncategorized:
+        tech_lines.append(f"  🔧 Other: {', '.join(uncategorized)}")
+
+    tech_display = "\n".join(tech_lines) if tech_lines else "  Any"
+
     text = (
-        "<b>Current alert filters:</b>\n\n"
-        f"🎯 Seniority: {seniorities or 'any'}\n"
-        f"💻 Technologies: {technologies or 'any'}\n\n"
-        "Change with /seniority or /tech"
+        "<b>📋 Current Alert Filters</b>\n\n"
+        f"<b>🎯 Seniority:</b> {sen_display}\n\n"
+        f"<b>💻 Technologies:</b>\n{tech_display}\n\n"
+        "<i>Change with /seniority or /tech</i>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -112,11 +193,12 @@ async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not args:
         config = load_config()
-        current = ", ".join(config.get("seniorities", []))
+        current = " · ".join(s.capitalize() for s in config.get("seniorities", []))
+        levels_display = " | ".join(sorted(valid_levels))
         await update.message.reply_text(
-            f"Current seniority filter: <b>{current or 'any'}</b>\n\n"
-            f"Usage: /seniority junior mid senior\n"
-            f"Valid: {', '.join(sorted(valid_levels))}",
+            f"<b>🎯 Current seniority filter:</b> {current or 'Any'}\n\n"
+            f"<b>Usage:</b> /seniority junior mid senior\n"
+            f"<b>Valid levels:</b> {levels_display}",
             parse_mode="HTML",
         )
         return
@@ -134,8 +216,9 @@ async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config["seniorities"] = levels
     save_config(config)
+    display = " · ".join(lv.capitalize() for lv in levels)
     await update.message.reply_text(
-        f"✅ Seniority filter updated: <b>{', '.join(levels)}</b>",
+        f"✅ Seniority filter updated:\n🎯 {display}",
         parse_mode="HTML",
     )
 
@@ -144,13 +227,24 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /tech command — set technology filter."""
     args = context.args
 
+    # /tech list — show all known technologies by category
+    if args and args[0].lower() == "list":
+        lines = ["<b>💻 Known Technologies:</b>\n"]
+        for category, techs in TECH_CATEGORIES.items():
+            lines.append(f"{category}")
+            lines.append(f"  <code>{', '.join(techs)}</code>\n")
+        lines.append("<i>You can use any name — these are just suggestions.</i>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
     if not args:
         config = load_config()
-        current = ", ".join(config.get("technologies", []))
+        technologies = config.get("technologies", [])
+        current = ", ".join(technologies) if technologies else "Any"
         await update.message.reply_text(
-            f"Current technology filter: <b>{current or 'any'}</b>\n\n"
-            f"Usage: /tech Python SQL dbt Airflow Spark\n"
-            f"Separate each tech with a space.",
+            f"<b>💻 Current technology filter:</b>\n{current}\n\n"
+            f"<b>Usage:</b> /tech Python SQL dbt Airflow\n"
+            f"<b>Browse available:</b> /tech list",
             parse_mode="HTML",
         )
         return
@@ -160,26 +254,39 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config["technologies"] = list(args)
     save_config(config)
     await update.message.reply_text(
-        f"✅ Technology filter updated: <b>{', '.join(args)}</b>",
+        f"✅ Technology filter updated:\n💻 {', '.join(args)}",
         parse_mode="HTML",
     )
 
 
 async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /latest — fetch recent listings from local data or Databricks."""
-    await update.message.reply_text("🔍 Fetching latest listings...\n")
+    await update.message.reply_text("🔍 Fetching latest listings...")
 
     config = load_config()
-    listings = _get_latest_listings(config)
 
-    if not listings:
+    try:
+        listings = _get_latest_listings(config)
+    except Exception as e:
+        logger.error(f"/latest failed: {e}")
         await update.message.reply_text(
-            "No recent listings match your current filters.\n"
-            "Try broadening with /seniority or /tech.",
+            "⚠️ Failed to fetch listings. The data source may be unavailable.\n"
+            "Try again later or check /stats for pipeline status.",
         )
         return
 
-    header = f"📋 <b>{len(listings)} recent match{'es' if len(listings) != 1 else ''}:</b>\n"
+    if not listings:
+        await update.message.reply_text(
+            "📭 No recent listings match your current filters.\n\n"
+            "This could mean:\n"
+            "• No scrape has run yet (check /stats)\n"
+            "• Your filters are too narrow — try /tech list or /seniority\n"
+            "• No new matching jobs in the last few days",
+        )
+        return
+
+    count = len(listings)
+    header = f"📋 <b>{count} recent match{'es' if count != 1 else ''}:</b>"
     await update.message.reply_text(header, parse_mode="HTML")
 
     import asyncio
@@ -187,11 +294,15 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram_bot.notify import format_listing
 
     for listing in listings[:10]:
-        await update.message.reply_text(
-            format_listing(listing),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        try:
+            await update.message.reply_text(
+                format_listing(listing),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to format/send listing: {e}")
+            continue
         await asyncio.sleep(0.3)
 
 
@@ -324,8 +435,7 @@ def _get_stats() -> dict:
         stats["raw_files"] = len(files)
         if files:
             latest = sorted(files, reverse=True)[0]
-            # Extract date from filename: raw_listings_YYYYMMDD_HHMMSS.json
-            stem = latest.stem  # raw_listings_20260808_060000
+            stem = latest.stem
             parts = stem.replace("raw_listings_", "")
             stats["last_scrape"] = parts.replace("_", " @ ")
     else:
@@ -356,6 +466,12 @@ def _get_stats() -> dict:
     return stats
 
 
+async def post_init(application: Application):
+    """Register command menu with Telegram after bot starts."""
+    await application.bot.set_my_commands(BOT_COMMANDS)
+    logger.info("Bot command menu registered")
+
+
 def main():
     """Start the bot with long-polling."""
     logging.basicConfig(
@@ -366,7 +482,7 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN not set")
         return
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     # Register command handlers
     app.add_handler(CommandHandler("start", cmd_start))
