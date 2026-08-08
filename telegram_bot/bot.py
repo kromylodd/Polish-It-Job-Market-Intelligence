@@ -991,8 +991,7 @@ async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Message content or specific filter combinations\n\n"
         "<b>Toggle:</b>\n"
         "  /privacy off — disable detailed tracking\n"
-        "  /privacy on — re-enable (helps improve the bot! 🙏)\n\n"
-        "View aggregated stats: /analytics"
+        "  /privacy on — re-enable (helps improve the bot! 🙏)"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
