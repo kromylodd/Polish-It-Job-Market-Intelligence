@@ -60,16 +60,9 @@ CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
 BOT_COMMANDS = [
     BotCommand("start", "Welcome + overview"),
-    BotCommand("filters", "View all current filters"),
-    BotCommand("seniority", "Set seniority level filter"),
-    BotCommand("tech", "Set technology filter"),
-    BotCommand("category", "Set job category filter"),
-    BotCommand("workplace", "Set workplace type (remote/hybrid/office)"),
-    BotCommand("employment", "Set employment type (b2b/uop/uz)"),
-    BotCommand("salary", "Set minimum salary"),
-    BotCommand("city", "Set city filter"),
-    BotCommand("tolerance", "Set filter mismatch tolerance"),
+    BotCommand("filters", "View & edit your filters"),
     BotCommand("latest", "Get recent matching listings"),
+    BotCommand("tolerance", "Set mismatch tolerance"),
     BotCommand("privacy", "Privacy & data info"),
     BotCommand("help", "Show all commands"),
 ]
@@ -115,18 +108,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_command(update.effective_chat.id, "help")
     text = (
-        "<b>All commands:</b>\n\n"
-        "📋 /filters — show all active filters\n"
-        "🎯 /seniority — set seniority levels\n"
-        "💻 /tech — set technologies (or /tech list)\n"
-        "📂 /category — set job categories (or /category list)\n"
-        "🏠 /workplace — remote / hybrid / office\n"
-        "📄 /employment — b2b / uop / zlecenie\n"
-        "💰 /salary — minimum salary\n"
-        "🏙️ /city — location filter\n"
-        "⚙️ /tolerance — mismatch tolerance (0=strict)\n"
-        "🔍 /latest — fetch recent matching listings\n"
-        "📊 /stats — pipeline statistics\n\n"
+        "<b>Commands:</b>\n\n"
+        "<b>Main:</b>\n"
+        "🔍 /latest — get recent matching listings\n"
+        "📋 /filters — view &amp; edit all filters\n"
+        "⚙️ /tolerance — set mismatch tolerance\n"
+        "🔒 /privacy — data collection settings\n\n"
+        "<b>Filter commands</b> (edit via /filters or directly):\n"
+        "  /seniority — junior, mid, senior, lead\n"
+        "  /tech — technologies (or /tech list)\n"
+        "  /category — job categories (or /category list)\n"
+        "  /workplace — remote / hybrid / office\n"
+        "  /employment — b2b / uop / zlecenie\n"
+        "  /salary — minimum salary\n"
+        "  /city — location filter\n\n"
         "<i>Empty filters = no restriction on that dimension.\n"
         "Only active filters count toward tolerance.</i>"
     )
@@ -142,7 +137,9 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Tolerance
     tol = config.get("tolerance", 1)
-    sections.append(f"⚙️ <b>Tolerance:</b> {tol} mismatch{'es' if tol != 1 else ''} allowed\n")
+    sections.append(
+        f"⚙️ <b>Tolerance:</b> {tol} mismatch{'es' if tol != 1 else ''} allowed" f"  · /tolerance\n"
+    )
 
     # Seniority
     sen = config.get("seniorities", [])
@@ -150,7 +147,7 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display = " · ".join(ALL_SENIORITIES.get(s, s) for s in sen)
     else:
         display = "<i>any</i>"
-    sections.append(f"🎯 <b>Seniority:</b> {display}")
+    sections.append(f"🎯 <b>Seniority:</b> {display}  · /seniority")
 
     # Categories
     cats = config.get("categories", [])
@@ -158,7 +155,7 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display = " · ".join(ALL_CATEGORIES.get(c, c) for c in cats)
     else:
         display = "<i>any</i>"
-    sections.append(f"📂 <b>Category:</b> {display}")
+    sections.append(f"📂 <b>Category:</b> {display}  · /category")
 
     # Technologies
     techs = config.get("technologies", [])
@@ -166,7 +163,7 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display = ", ".join(techs)
     else:
         display = "<i>any</i>"
-    sections.append(f"💻 <b>Technologies:</b> {display}")
+    sections.append(f"💻 <b>Technologies:</b> {display}  · /tech")
 
     # Workplace
     wp = config.get("workplace_types", [])
@@ -174,7 +171,7 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display = " · ".join(ALL_WORKPLACES.get(w, w) for w in wp)
     else:
         display = "<i>any</i>"
-    sections.append(f"🏠 <b>Workplace:</b> {display}")
+    sections.append(f"🏠 <b>Workplace:</b> {display}  · /workplace")
 
     # Employment
     emp = config.get("employment_types", [])
@@ -182,13 +179,12 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display = " · ".join(ALL_EMPLOYMENT_TYPES.get(e, e) for e in emp)
     else:
         display = "<i>any</i>"
-    sections.append(f"📄 <b>Employment:</b> {display}")
+    sections.append(f"📄 <b>Employment:</b> {display}  · /employment")
 
     # Salary
     sal = config.get("salary_min", 0)
-    sections.append(
-        f"💰 <b>Min salary:</b> {sal} PLN" if sal else "💰 <b>Min salary:</b> <i>any</i>"
-    )
+    sal_display = f"{sal} PLN" if sal else "<i>any</i>"
+    sections.append(f"💰 <b>Min salary:</b> {sal_display}  · /salary")
 
     # Cities
     cities = config.get("cities", [])
@@ -196,7 +192,9 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display = ", ".join(cities)
     else:
         display = "<i>any</i>"
-    sections.append(f"🏙️ <b>Cities:</b> {display}")
+    sections.append(f"🏙️ <b>Cities:</b> {display}  · /city")
+
+    sections.append("\n<i>Tap any /command to edit that filter.</i>")
 
     await update.message.reply_text("\n".join(sections), parse_mode="HTML")
 
