@@ -54,6 +54,7 @@ from telegram_bot.filters import (
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+ADMIN_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))
 
 CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
@@ -69,8 +70,6 @@ BOT_COMMANDS = [
     BotCommand("city", "Set city filter"),
     BotCommand("tolerance", "Set filter mismatch tolerance"),
     BotCommand("latest", "Get recent matching listings"),
-    BotCommand("stats", "Pipeline statistics"),
-    BotCommand("analytics", "Bot usage statistics"),
     BotCommand("privacy", "Privacy & data info"),
     BotCommand("help", "Show all commands"),
 ]
@@ -563,6 +562,9 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show pipeline statistics (admin only)."""
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
     log_command(update.effective_chat.id, "stats")
     stats = _get_stats()
     text = (
@@ -575,7 +577,9 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show aggregated bot usage analytics."""
+    """Show aggregated bot usage analytics (admin only)."""
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
     log_command(update.effective_chat.id, "analytics")
     summary = get_analytics_summary()
 
