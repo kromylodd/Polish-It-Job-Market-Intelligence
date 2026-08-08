@@ -12,12 +12,13 @@ jobs:
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      DATABRICKS_JOB_ID: ${{ secrets.DATABRICKS_JOB_ID }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -44,10 +45,14 @@ jobs:
       - name: Trigger Databricks Workflow
         if: success()
         run: |
-          curl -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
+          if [ -z "${DATABRICKS_JOB_ID}" ]; then
+            echo "DATABRICKS_JOB_ID secret is not set" >&2
+            exit 1
+          fi
+          curl -sS --fail-with-body -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
             -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d '{"job_id": 364503100278093}'
+            -d "{\"job_id\": ${DATABRICKS_JOB_ID}}"
 
   # Telegram notifications (runs after pipeline completes)
   notify:
@@ -63,10 +68,10 @@ jobs:
       DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_WAREHOUSE_ID }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip

@@ -46,6 +46,9 @@ dbt/.user.yml
 htmlcov/
 .coverage
 
+# Local session notes
+HANDOFF.md
+
 # Data files (don't commit raw scraped data)
 data/
 *.json

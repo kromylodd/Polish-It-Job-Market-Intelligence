@@ -12,22 +12,25 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install ruff pytest requests
+        run: pip install -r requirements-ci.txt
 
       - name: Lint
         run: ruff check . --select E,F,I,W --ignore E501
 
-      - name: Format check
+      - name: Ruff format check
         run: ruff format --check .
+
+      - name: Black format check
+        run: black --check .
 
       - name: Tests
         run: pytest scraper/tests/ -v --tb=short
@@ -35,15 +38,16 @@ jobs:
   dbt-parse:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install dbt
-        run: pip install dbt-core dbt-databricks
+        run: pip install dbt-core==1.8.4 dbt-databricks==1.8.0
 
       - name: dbt deps + parse
         working-directory: dbt

@@ -25,7 +25,6 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessag
 ALERT_FILTERS = {
     "seniorities": ["junior", "mid"],
     "technologies": ["Python", "SQL", "Apache Spark", "dbt", "Apache Airflow"],
-    "workplace_types": ["remote", "hybrid"],
 }
 
 
@@ -159,6 +158,7 @@ if can_reach and matching:
     print(f"Sent {sent}/{len(matching)} notifications")
 elif not can_reach:
     print("Telegram unreachable from Databricks; use GitHub Actions fallback")
-    dbutils.notebook.exit(json.dumps({"status": "telegram_unreachable", "count": len(matching)}))  # noqa: F821
+    _payload = json.dumps({"status": "telegram_unreachable", "count": len(matching)})
+    dbutils.notebook.exit(_payload)  # noqa: F821
 else:
     print("No matching listings")
