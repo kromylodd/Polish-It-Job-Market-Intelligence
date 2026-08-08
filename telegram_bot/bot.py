@@ -34,6 +34,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from telegram_bot.analytics import get_analytics_summary, log_command, log_filter_choice
 from telegram_bot.filters import (
     ALL_CATEGORIES,
     ALL_EMPLOYMENT_TYPES,
@@ -63,6 +64,8 @@ BOT_COMMANDS = [
     BotCommand("tolerance", "Set filter mismatch tolerance"),
     BotCommand("latest", "Get recent matching listings"),
     BotCommand("stats", "Pipeline statistics"),
+    BotCommand("analytics", "Bot usage statistics"),
+    BotCommand("privacy", "Privacy & data info"),
     BotCommand("help", "Show all commands"),
 ]
 
@@ -80,6 +83,7 @@ def save_config(config: dict):
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "start")
     text = (
         "👋 <b>Polish IT Job Market Intelligence</b>\n\n"
         "I send you daily alerts for IT job listings from justjoin.it "
@@ -95,12 +99,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>🎯 Tolerance:</b> Set how many filters can mismatch.\n"
         "E.g. tolerance=1 means if everything matches except one "
         "filter, the listing still appears.\n\n"
-        "<b>Commands:</b> /help"
+        "<b>Commands:</b> /help\n\n"
+        "<i>📊 This bot collects anonymous usage statistics (command popularity, "
+        "popular filters) to improve the service. No personal data is stored — "
+        "see /privacy.</i>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "help")
     text = (
         "<b>All commands:</b>\n\n"
         "📋 /filters — show all active filters\n"
@@ -121,6 +129,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "filters")
     config = load_config()
 
     sections = []
@@ -188,6 +197,7 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "seniority")
     args = context.args
     valid = set(ALL_SENIORITIES.keys())
 
@@ -215,11 +225,13 @@ async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config["seniorities"] = levels
     save_config(config)
+    log_filter_choice(update.effective_chat.id, "seniority", levels)
     display = " · ".join(ALL_SENIORITIES.get(lv, lv) for lv in levels)
     await update.message.reply_text(f"✅ Seniority → {display}", parse_mode="HTML")
 
 
 async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "tech")
     args = context.args
 
     if args and args[0].lower() == "list":
@@ -254,10 +266,12 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config["technologies"] = list(args)
     save_config(config)
+    log_filter_choice(update.effective_chat.id, "technology", list(args))
     await update.message.reply_text(f"✅ Technologies → {', '.join(args)}", parse_mode="HTML")
 
 
 async def cmd_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "category")
     args = context.args
 
     if args and args[0].lower() == "list":
@@ -299,11 +313,13 @@ async def cmd_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config["categories"] = cats
     save_config(config)
+    log_filter_choice(update.effective_chat.id, "category", cats)
     display = ", ".join(ALL_CATEGORIES.get(c, c) for c in cats)
     await update.message.reply_text(f"✅ Categories → {display}", parse_mode="HTML")
 
 
 async def cmd_workplace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "workplace")
     args = context.args
 
     if args and args[0].lower() == "clear":
@@ -339,11 +355,13 @@ async def cmd_workplace(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config["workplace_types"] = types
     save_config(config)
+    log_filter_choice(update.effective_chat.id, "workplace", types)
     display = " · ".join(ALL_WORKPLACES.get(t, t) for t in types)
     await update.message.reply_text(f"✅ Workplace → {display}", parse_mode="HTML")
 
 
 async def cmd_employment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "employment")
     args = context.args
 
     if args and args[0].lower() == "clear":
@@ -379,11 +397,13 @@ async def cmd_employment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config["employment_types"] = types
     save_config(config)
+    log_filter_choice(update.effective_chat.id, "employment", types)
     display = " · ".join(ALL_EMPLOYMENT_TYPES.get(t, t) for t in types)
     await update.message.reply_text(f"✅ Employment → {display}", parse_mode="HTML")
 
 
 async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "salary")
     args = context.args
 
     if args and args[0].lower() == "clear":
@@ -419,6 +439,7 @@ async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "city")
     args = context.args
 
     if args and args[0].lower() == "clear":
@@ -443,10 +464,12 @@ async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     config["cities"] = list(args)
     save_config(config)
+    log_filter_choice(update.effective_chat.id, "city", list(args))
     await update.message.reply_text(f"✅ Cities → {', '.join(args)}")
 
 
 async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "tolerance")
     args = context.args
 
     if not args:
@@ -483,6 +506,7 @@ async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "latest")
     await update.message.reply_text("🔍 Fetching latest listings...")
 
     config = load_config()
@@ -533,12 +557,98 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_command(update.effective_chat.id, "stats")
     stats = _get_stats()
     text = (
         "<b>📊 Pipeline Statistics</b>\n\n"
         f"📁 Raw files scraped: {stats.get('raw_files', 'N/A')}\n"
         f"📨 Alerts sent (total): {stats.get('alerts_sent', 'N/A')}\n"
         f"📅 Last scrape: {stats.get('last_scrape', 'N/A')}\n"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show aggregated bot usage analytics."""
+    log_command(update.effective_chat.id, "analytics")
+    summary = get_analytics_summary()
+
+    lines = ["<b>📊 Bot Usage Analytics</b>\n"]
+    lines.append(f"👥 Unique users: {summary['total_users']}")
+    lines.append(f"📨 Total interactions: {summary['total_events']}\n")
+
+    # Command usage
+    cmds = summary.get("commands", {})
+    if cmds:
+        lines.append("<b>🔤 Command usage:</b>")
+        for cmd, count in list(cmds.items())[:8]:
+            lines.append(f"  /{cmd}: {count}")
+        lines.append("")
+
+    # Top technologies
+    techs = summary.get("top_technologies", {})
+    if techs:
+        lines.append("<b>💻 Most popular technologies:</b>")
+        for tech, count in list(techs.items())[:7]:
+            lines.append(f"  {tech}: {count}")
+        lines.append("")
+
+    # Top categories
+    cats = summary.get("top_categories", {})
+    if cats:
+        lines.append("<b>📂 Most popular categories:</b>")
+        for cat, count in list(cats.items())[:7]:
+            label = ALL_CATEGORIES.get(cat, cat)
+            lines.append(f"  {label}: {count}")
+        lines.append("")
+
+    # Top cities
+    cities = summary.get("top_cities", {})
+    if cities:
+        lines.append("<b>🏙️ Most popular cities:</b>")
+        for city, count in list(cities.items())[:7]:
+            lines.append(f"  {city}: {count}")
+        lines.append("")
+
+    # Top seniorities
+    sens = summary.get("top_seniorities", {})
+    if sens:
+        lines.append("<b>🎯 Seniority demand:</b>")
+        for sen, count in sens.items():
+            label = ALL_SENIORITIES.get(sen, sen)
+            lines.append(f"  {label}: {count}")
+        lines.append("")
+
+    # Top workplaces
+    wps = summary.get("top_workplaces", {})
+    if wps:
+        lines.append("<b>🏠 Workplace preference:</b>")
+        for wp, count in wps.items():
+            label = ALL_WORKPLACES.get(wp, wp)
+            lines.append(f"  {label}: {count}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show privacy/data collection info."""
+    log_command(update.effective_chat.id, "privacy")
+    text = (
+        "<b>🔒 Privacy &amp; Data Collection</b>\n\n"
+        "This bot collects <b>anonymous usage statistics</b> to improve "
+        "the service and understand what the IT job market needs.\n\n"
+        "<b>What is collected:</b>\n"
+        "• Which commands are used (and how often)\n"
+        "• Which filters are popular (technologies, categories, cities)\n"
+        "• Total unique user count\n\n"
+        "<b>What is NOT collected:</b>\n"
+        "• Your name, username, or any personal info\n"
+        "• Your chat ID (it's hashed one-way before storage)\n"
+        "• Message content\n"
+        "• Your specific filter combinations\n\n"
+        "<b>Storage:</b> Local SQLite database on the bot server.\n"
+        "Data is never shared with third parties.\n\n"
+        "View aggregated stats: /analytics"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -683,6 +793,8 @@ def main():
     app.add_handler(CommandHandler("tolerance", cmd_tolerance))
     app.add_handler(CommandHandler("latest", cmd_latest))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("analytics", cmd_analytics))
+    app.add_handler(CommandHandler("privacy", cmd_privacy))
 
     logger.info("Bot starting (long-polling)...")
     app.run_polling(drop_pending_updates=True)

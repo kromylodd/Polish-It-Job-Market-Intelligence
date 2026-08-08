@@ -51,6 +51,7 @@ HANDOFF.md
 
 # Bot user preferences (runtime, per-user)
 telegram_bot/user_config.json
+telegram_bot/analytics.db
 
 # Data files (don't commit raw scraped data)
 data/
