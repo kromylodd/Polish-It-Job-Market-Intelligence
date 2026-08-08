@@ -2,11 +2,15 @@
 Upload raw JSON files to Unity Catalog managed Volume via Databricks SDK.
 
 Runs in GitHub Actions, authenticated via DATABRICKS_HOST + DATABRICKS_TOKEN env vars.
+
+Includes retry logic for transient SSL/connection errors that occur when the
+Databricks workspace (Free Edition) is waking from an idle state.
 """
 
 import json
 import logging
 import sys
+import time
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -16,6 +20,9 @@ from databricks.sdk import WorkspaceClient
 logger = logging.getLogger(__name__)
 
 VOLUME_PATH = "/Volumes/job_market/bronze/raw_listings"
+
+MAX_UPLOAD_RETRIES = 5
+RETRY_BACKOFF_SECONDS = 30  # wait between retries (workspace may be waking up)
 
 
 def get_workspace_client() -> WorkspaceClient:
@@ -28,12 +35,41 @@ def upload_file(
     local_path: Path,
     volume_path: str = VOLUME_PATH,
 ) -> str:
-    """Upload local file to Volume. Returns remote path."""
+    """Upload local file to Volume with retries. Returns remote path."""
     remote_path = f"{volume_path}/{local_path.name}"
-    with open(local_path, "rb") as f:
-        client.files.upload(remote_path, f, overwrite=True)
-    logger.info(f"Uploaded {local_path} -> {remote_path}")
-    return remote_path
+
+    for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
+        try:
+            with open(local_path, "rb") as f:
+                client.files.upload(remote_path, f, overwrite=True)
+            logger.info(f"Uploaded {local_path} -> {remote_path}")
+            return remote_path
+        except (TimeoutError, OSError, ConnectionError) as e:
+            logger.warning(f"Upload attempt {attempt}/{MAX_UPLOAD_RETRIES} failed: {e}")
+            if attempt < MAX_UPLOAD_RETRIES:
+                wait = RETRY_BACKOFF_SECONDS * attempt
+                logger.info(f"Retrying in {wait}s (workspace may be waking)...")
+                time.sleep(wait)
+            else:
+                raise
+        except Exception as e:
+            # Catch SDK-wrapped SSL/request errors
+            err_str = str(e).lower()
+            if "ssl" in err_str or "timed out" in err_str or "eof" in err_str:
+                logger.warning(
+                    f"Upload attempt {attempt}/{MAX_UPLOAD_RETRIES} failed (SSL/timeout): {e}"
+                )
+                if attempt < MAX_UPLOAD_RETRIES:
+                    wait = RETRY_BACKOFF_SECONDS * attempt
+                    logger.info(f"Retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+            else:
+                raise
+
+    # Should not reach here, but just in case
+    raise RuntimeError(f"Upload failed after {MAX_UPLOAD_RETRIES} attempts")
 
 
 def upload_json_data(
@@ -49,9 +85,34 @@ def upload_json_data(
 
     remote_path = f"{volume_path}/{filename}"
     json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-    client.files.upload(remote_path, BytesIO(json_bytes), overwrite=True)
-    logger.info(f"Uploaded {len(json_bytes)} bytes -> {remote_path}")
-    return remote_path
+
+    for attempt in range(1, MAX_UPLOAD_RETRIES + 1):
+        try:
+            client.files.upload(remote_path, BytesIO(json_bytes), overwrite=True)
+            logger.info(f"Uploaded {len(json_bytes)} bytes -> {remote_path}")
+            return remote_path
+        except (TimeoutError, OSError, ConnectionError) as e:
+            logger.warning(f"Upload attempt {attempt}/{MAX_UPLOAD_RETRIES} failed: {e}")
+            if attempt < MAX_UPLOAD_RETRIES:
+                wait = RETRY_BACKOFF_SECONDS * attempt
+                logger.info(f"Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
+        except Exception as e:
+            err_str = str(e).lower()
+            if "ssl" in err_str or "timed out" in err_str or "eof" in err_str:
+                logger.warning(f"Upload attempt {attempt}/{MAX_UPLOAD_RETRIES} failed: {e}")
+                if attempt < MAX_UPLOAD_RETRIES:
+                    wait = RETRY_BACKOFF_SECONDS * attempt
+                    logger.info(f"Retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+            else:
+                raise
+
+    raise RuntimeError(f"Upload failed after {MAX_UPLOAD_RETRIES} attempts")
 
 
 if __name__ == "__main__":

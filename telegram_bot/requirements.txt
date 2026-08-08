@@ -1,0 +1,4 @@
+# Telegram bot runtime dependencies
+python-telegram-bot==21.5
+requests==2.32.3
+databricks-sql-connector==3.3.0
