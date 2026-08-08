@@ -72,14 +72,18 @@ def _hash_user(chat_id: int) -> str:
     return hashlib.sha256(str(chat_id).encode()).hexdigest()[:16]
 
 
-def _ensure_user(conn: sqlite3.Connection, user_hash: str):
-    """Register user if not seen before (counts toward total users)."""
+def _ensure_user(conn: sqlite3.Connection, user_hash: str) -> bool:
+    """Register user if not seen before. Returns True if new user."""
+    row = conn.execute("SELECT 1 FROM users WHERE user_hash = ?", (user_hash,)).fetchone()
+    if row:
+        return False
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT OR IGNORE INTO users (user_hash, first_seen, opted_out) VALUES (?, ?, 0)",
         (user_hash, now),
     )
     conn.commit()
+    return True
 
 
 def is_opted_out(chat_id: int) -> bool:
@@ -106,11 +110,11 @@ def log_command(chat_id: int, command: str):
     """Log a command usage event. Respects opt-out (only counts user)."""
     conn = _get_conn()
     user_hash = _hash_user(chat_id)
-    _ensure_user(conn, user_hash)
+    is_new = _ensure_user(conn, user_hash)
 
     # If opted out, don't log command details
     if is_opted_out(chat_id):
-        return
+        return is_new
 
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
@@ -118,6 +122,7 @@ def log_command(chat_id: int, command: str):
         (now, user_hash, "command", command),
     )
     conn.commit()
+    return is_new
 
 
 def log_filter_choice(chat_id: int, dimension: str, values: list[str]):

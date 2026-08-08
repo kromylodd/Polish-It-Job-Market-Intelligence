@@ -82,13 +82,22 @@ def save_config(config: dict):
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_command(update.effective_chat.id, "start")
+    is_new = log_command(update.effective_chat.id, "start")
+
+    # Log default preferences for new users so they count in statistics
+    if is_new:
+        chat_id = update.effective_chat.id
+        config = load_config()
+        log_filter_choice(chat_id, "seniority", config.get("seniorities", []))
+        log_filter_choice(chat_id, "category", config.get("categories", []))
+        log_filter_choice(chat_id, "workplace", config.get("workplace_types", []))
+        log_filter_choice(chat_id, "employment", config.get("employment_types", []))
     text = (
         "👋 <b>Polish IT Job Market Intelligence</b>\n\n"
         "I send you daily alerts for IT job listings from justjoin.it "
         "matching your personal filters.\n\n"
         "<b>🎛️ Filter dimensions:</b>\n"
-        "• Seniority (junior/mid/senior/lead)\n"
+        "• Seniority (intern/junior/mid/senior/lead)\n"
         "• Technologies (Python, React, Docker, etc.)\n"
         "• Category (python, java, devops, data, mobile...)\n"
         "• Workplace (remote/hybrid/office)\n"

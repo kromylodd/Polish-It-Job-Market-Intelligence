@@ -46,11 +46,13 @@ ALL_CATEGORIES = {
 }
 
 ALL_SENIORITIES = {
+    "intern": "🎓 Intern",
     "junior": "🌱 Junior",
     "mid": "💼 Mid",
     "senior": "🏆 Senior",
     "lead": "👑 Lead",
     "manager": "📊 Manager",
+    "c_level": "🏛️ C-Level",
 }
 
 ALL_WORKPLACES = {
@@ -222,7 +224,7 @@ KNOWN_CITIES = {
 # --- Default user config ---
 
 DEFAULT_USER_CONFIG = {
-    "seniorities": ["junior", "mid", "senior", "lead", "manager"],
+    "seniorities": ["intern", "junior", "mid", "senior", "lead", "manager", "c_level"],
     "technologies": [],  # Empty = don't filter on tech (show all)
     "categories": list(ALL_CATEGORIES.keys()),  # All enabled by default
     "workplace_types": ["remote", "hybrid", "office"],  # All enabled
