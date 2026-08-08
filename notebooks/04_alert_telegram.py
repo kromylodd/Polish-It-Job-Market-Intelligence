@@ -1,11 +1,11 @@
 # Databricks notebook source
 # Telegram alert: query gold for new matching listings, push via Bot API.
 #
-# May need to run outside Databricks (GitHub Actions) if api.telegram.org
-# is not on Free Edition's outbound allowlist. Test connectivity first.
+# Uses an idempotency log (job_market.gold.telegram_alerts_sent) so that
+# both this notebook and the GitHub Actions fallback (telegram_bot/notify.py)
+# can run unconditionally without producing duplicate alerts.
 
 import html
-import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -14,6 +14,7 @@ from urllib.parse import quote
 import requests
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
+from pyspark.sql.types import LongType, StructField, StructType, TimestampType
 
 spark = SparkSession.builder.getOrCreate()
 
@@ -27,6 +28,8 @@ ALERT_FILTERS = {
     "technologies": ["Python", "SQL", "Apache Spark", "dbt", "Apache Airflow"],
 }
 
+ALERTS_SENT_TABLE = "job_market.gold.telegram_alerts_sent"
+
 
 def check_telegram_connectivity() -> bool:
     try:
@@ -37,12 +40,42 @@ def check_telegram_connectivity() -> bool:
         return False
 
 
+def ensure_alerts_sent_table_exists():
+    """Create the idempotency log table if it doesn't exist."""
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {ALERTS_SENT_TABLE} (
+            listing_id BIGINT,
+            sent_at TIMESTAMP
+        )
+        USING DELTA
+    """
+    )
+
+
+def get_already_sent_ids() -> set[int]:
+    """Return listing_ids that have already been notified."""
+    return {row.listing_id for row in spark.table(ALERTS_SENT_TABLE).select("listing_id").collect()}
+
+
+def record_sent_ids(listing_ids: list[int]):
+    """Write successfully-sent listing_ids to the idempotency log."""
+    if not listing_ids:
+        return
+    now = datetime.now(timezone.utc)
+    schema = StructType(
+        [
+            StructField("listing_id", LongType(), False),
+            StructField("sent_at", TimestampType(), False),
+        ]
+    )
+    rows = [(lid, now) for lid in listing_ids]
+    spark.createDataFrame(rows, schema).write.mode("append").saveAsTable(ALERTS_SENT_TABLE)
+
+
 def normalize_row(row) -> dict:
     """Normalize a Spark Row from either the gold mart or the silver fallback
     into a single flat dict, so downstream match/format logic is schema-agnostic.
-
-    - gold mart exposes: technologies, salary_min/max, currency, employment_type
-    - silver fallback exposes: all_technologies, salary_variants (array of structs)
     """
     d = row.asDict(recursive=True)
 
@@ -62,6 +95,7 @@ def normalize_row(row) -> dict:
         employment_type = sv.get("employment_type")
 
     return {
+        "listing_id": d.get("listing_id"),
         "title": d.get("title", ""),
         "company_name": d.get("company_name", ""),
         "cities": d.get("cities") or [],
@@ -86,8 +120,6 @@ def format_listing(listing: dict) -> str:
             f"{listing['currency']} ({listing['employment_type']})"
         )
 
-    # slug builds a URL (quote it); everything else is HTML-escaped since we
-    # send with parse_mode=HTML and titles/company names are free text.
     slug = listing["slug"]
     link = f"\nhttps://justjoin.it/offers/{quote(str(slug), safe='')}" if slug else ""
 
@@ -119,46 +151,59 @@ def send_message(text: str) -> bool:
         return False
 
 
+# --- Main logic ---
+
 # Check connectivity
 can_reach = check_telegram_connectivity()
+if not can_reach:
+    print("Telegram unreachable from Databricks; GitHub Actions fallback will handle it")
+    # Exit early — no point querying if we can't send.
 
-# Query new listings.
-# The gold mart exposes `posted_date` (a DATE); the silver fallback table
-# exposes `date_collected` (an ISO-8601 string). Use the right column/type for each.
-yesterday_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-yesterday_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+if can_reach:
+    # Ensure idempotency log exists
+    ensure_alerts_sent_table_exists()
+    sent_ids = get_already_sent_ids()
 
-try:
-    df = spark.table("job_market.gold.mart_junior_market_snapshot").filter(
-        col("posted_date") >= yesterday_date
-    )
-except Exception:
-    df = (
-        spark.table("job_market.silver.listings_with_tech")
-        .filter(col("date_collected") >= yesterday_iso)
-        .filter(col("seniority").isin(ALERT_FILTERS["seniorities"]))
-    )
+    # Query new listings
+    yesterday_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
-matching = []
-for row in df.collect():
-    listing = normalize_row(row)
-    if any(t in listing["technologies"] for t in ALERT_FILTERS["technologies"]):
-        matching.append(listing)
+    try:
+        df = spark.table("job_market.gold.mart_junior_market_snapshot").filter(
+            col("posted_date") >= yesterday_date
+        )
+    except Exception:
+        yesterday_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        df = (
+            spark.table("job_market.silver.listings_with_tech")
+            .filter(col("date_collected") >= yesterday_iso)
+            .filter(col("seniority").isin(ALERT_FILTERS["seniorities"]))
+        )
 
-print(f"Found {len(matching)} matching listings")
+    # Filter: match criteria + not already sent
+    matching = []
+    for row in df.collect():
+        listing = normalize_row(row)
+        lid = listing.get("listing_id")
+        if lid is None:
+            continue
+        if lid in sent_ids:
+            continue
+        if any(t in listing["technologies"] for t in ALERT_FILTERS["technologies"]):
+            matching.append(listing)
 
-# Send
-if can_reach and matching:
-    send_message(f"<b>Daily alert</b> - {len(matching)} new matches\n")
-    sent = 0
-    for m in matching[:20]:
-        if send_message(format_listing(m)):
-            sent += 1
-        time.sleep(0.5)  # stay under Telegram's per-chat rate limit
-    print(f"Sent {sent}/{len(matching)} notifications")
-elif not can_reach:
-    print("Telegram unreachable from Databricks; use GitHub Actions fallback")
-    _payload = json.dumps({"status": "telegram_unreachable", "count": len(matching)})
-    dbutils.notebook.exit(_payload)  # noqa: F821
-else:
-    print("No matching listings")
+    print(f"Found {len(matching)} new matching listings (after dedup)")
+
+    # Send
+    if matching:
+        send_message(f"<b>Daily alert</b> — {len(matching)} new matches\n")
+        successfully_sent: list[int] = []
+        for m in matching[:20]:
+            if send_message(format_listing(m)):
+                successfully_sent.append(m["listing_id"])
+            time.sleep(0.5)
+
+        # Record sent listings in idempotency log
+        record_sent_ids(successfully_sent)
+        print(f"Sent {len(successfully_sent)}/{len(matching)} notifications")
+    else:
+        print("No new matching listings to send")
