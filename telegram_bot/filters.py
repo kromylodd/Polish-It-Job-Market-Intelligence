@@ -181,6 +181,44 @@ TECH_CATEGORIES = {
 
 ALL_KNOWN_TECHS = [tech for techs in TECH_CATEGORIES.values() for tech in techs]
 
+# Known cities from justjoin.it (Polish + common cross-border)
+KNOWN_CITIES = {
+    "Białystok",
+    "Bielsko-Biała",
+    "Bydgoszcz",
+    "Częstochowa",
+    "Gdańsk",
+    "Gdynia",
+    "Gliwice",
+    "Gorzów Wielkopolski",
+    "Katowice",
+    "Kielce",
+    "Kraków",
+    "Lublin",
+    "Łódź",
+    "Nowy Sącz",
+    "Olsztyn",
+    "Opole",
+    "Poznań",
+    "Płock",
+    "Radom",
+    "Rzeszów",
+    "Rybnik",
+    "Sopot",
+    "Sosnowiec",
+    "Szczecin",
+    "Toruń",
+    "Trójmiasto",
+    "Warszawa",
+    "Warsaw",
+    "Wrocław",
+    "Zabrze",
+    "Zielona Góra",
+    # Common remote/international
+    "Remote",
+    "Polska",
+}
+
 # --- Default user config ---
 
 DEFAULT_USER_CONFIG = {

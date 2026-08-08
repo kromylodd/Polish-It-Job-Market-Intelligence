@@ -679,26 +679,95 @@ async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
         config = load_config()
         config["cities"] = []
         save_config(config)
-        await update.message.reply_text("✅ City filter cleared (matching any)")
+        await update.message.reply_text("✅ City filter cleared (matching any location)")
+        return
+
+    if args and args[0].lower() == "remove":
+        # /city remove Kraków — remove specific cities
+        to_remove = [a for a in args[1:]]
+        if not to_remove:
+            await update.message.reply_text("Usage: /city remove Kraków Gdańsk")
+            return
+        config = load_config()
+        current = config.get("cities", [])
+        removed = [c for c in to_remove if c in current]
+        config["cities"] = [c for c in current if c not in to_remove]
+        save_config(config)
+        if removed:
+            remaining = ", ".join(config["cities"]) if config["cities"] else "any"
+            await update.message.reply_text(
+                f"✅ Removed: {', '.join(removed)}\n🏙️ Current: {remaining}"
+            )
+        else:
+            await update.message.reply_text("❌ None of those were in your filter.")
+        return
+
+    if args and args[0].lower() == "list":
+        from telegram_bot.filters import KNOWN_CITIES
+
+        cities_sorted = sorted(KNOWN_CITIES)
+        await update.message.reply_text(
+            "🏙️ <b>Known cities:</b>\n\n"
+            f"<code>{', '.join(cities_sorted)}</code>\n\n"
+            "<i>You can add any city — these are just the ones we've seen in listings.</i>",
+            parse_mode="HTML",
+        )
         return
 
     if not args:
         config = load_config()
         cities = config.get("cities", [])
-        current = ", ".join(cities) if cities else "any"
+        current = ", ".join(cities) if cities else "any (all locations)"
         await update.message.reply_text(
             f"🏙️ <b>Current:</b> {current}\n\n"
-            f"<b>Usage:</b> /city Warszawa Kraków Remote\n"
-            f"<b>Clear:</b> /city clear",
+            f"<b>Add cities:</b> /city Warszawa Kraków\n"
+            f"<b>Remove:</b> /city remove Kraków\n"
+            f"<b>See known:</b> /city list\n"
+            f"<b>Clear all:</b> /city clear\n\n"
+            f"<i>Adding cities doesn't remove existing ones.</i>",
             parse_mode="HTML",
         )
         return
 
+    # Additive: add new cities to existing list
+    from telegram_bot.filters import KNOWN_CITIES
+
     config = load_config()
-    config["cities"] = list(args)
+    current = config.get("cities", [])
+
+    added = []
+    warnings = []
+    for city in args:
+        if city in current:
+            continue  # already there
+        # Check if known (case-insensitive)
+        known_match = next((c for c in KNOWN_CITIES if c.lower() == city.lower()), None)
+        if known_match:
+            added.append(known_match)  # Use canonical casing
+        else:
+            # Not in known list — warn but still add
+            added.append(city)
+            # Suggest close matches
+            close = [
+                c for c in KNOWN_CITIES if city.lower() in c.lower() or c.lower() in city.lower()
+            ]
+            if close:
+                warnings.append(f"⚠️ '{city}' not recognized. Did you mean: {', '.join(close[:3])}?")
+            else:
+                warnings.append(f"⚠️ '{city}' not in known cities (added anyway)")
+
+    config["cities"] = current + added
     save_config(config)
-    log_filter_choice(update.effective_chat.id, "city", list(args))
-    await update.message.reply_text(f"✅ Cities → {', '.join(args)}")
+    log_filter_choice(update.effective_chat.id, "city", config["cities"])
+
+    parts = []
+    if added:
+        parts.append(f"✅ Added: {', '.join(added)}")
+    parts.append(f"🏙️ Current: {', '.join(config['cities'])}")
+    if warnings:
+        parts.extend(warnings)
+
+    await update.message.reply_text("\n".join(parts))
 
 
 async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
