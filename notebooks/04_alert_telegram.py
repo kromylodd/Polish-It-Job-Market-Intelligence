@@ -322,6 +322,29 @@ if can_reach:
     # (published by the bot). Falls back to the admin chat with default filters.
     recipients = load_user_configs()
 
+    MAX_PER_USER = 20
+    MAX_MSG_LEN = 4096
+
+    def build_combined_message(listings_batch: list) -> list:
+        """Combine listings into as few messages as possible (max 4096 chars each)."""
+        header = f"<b>📋 Daily alert — {len(listings_batch)} new matches</b>\n"
+        separator = "\n———\n"
+        chunks = []
+        current = header
+
+        for listing in listings_batch:
+            formatted = format_listing(listing)
+            addition = separator + formatted if current != header else "\n" + formatted
+            if len(current) + len(addition) > MAX_MSG_LEN:
+                chunks.append(current)
+                current = formatted
+            else:
+                current += addition
+
+        if current:
+            chunks.append(current)
+        return chunks
+
     total_sent = 0
     for chat_id, config in recipients.items():
         matching = [
@@ -339,14 +362,14 @@ if can_reach:
         if not matching:
             continue
 
-        send_message(chat_id, f"<b>Daily alert</b> — {len(matching)} new matches\n")
-        newly_sent = []
-        for m in matching[:20]:
-            if send_message(chat_id, format_listing(m)):
-                newly_sent.append((m["listing_id"], str(chat_id)))
+        to_send = matching[:MAX_PER_USER]
+        chunks = build_combined_message(to_send)
+        for chunk in chunks:
+            send_message(chat_id, chunk)
             time.sleep(0.5)
 
         # Record after each recipient so a mid-run failure can't re-notify them.
+        newly_sent = [(m["listing_id"], str(chat_id)) for m in to_send]
         record_sent_pairs(newly_sent)
         total_sent += len(newly_sent)
 

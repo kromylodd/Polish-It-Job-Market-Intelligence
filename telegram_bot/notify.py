@@ -202,8 +202,43 @@ def send_message(chat_id: str, text: str) -> bool:
         return False
 
 
+def _build_combined_message(listings: list[dict]) -> list[str]:
+    """Build combined message(s) from listings, respecting Telegram's 4096 char limit.
+
+    Returns a list of message chunks, each under the limit. The first chunk
+    includes a header; subsequent chunks are continuations.
+    """
+    MAX_MSG_LEN = 4096
+    header = f"<b>📋 Daily alert — {len(listings)} new matches</b>\n"
+    separator = "\n———\n"
+
+    chunks: list[str] = []
+    current = header
+
+    for listing in listings:
+        formatted = format_listing(listing)
+        # Check if adding this listing would exceed the limit
+        addition = separator + formatted if current != header else "\n" + formatted
+        if len(current) + len(addition) > MAX_MSG_LEN:
+            # Flush current chunk and start a new one
+            chunks.append(current)
+            current = formatted
+        else:
+            current += addition
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
 def broadcast(conn) -> int:
-    """Send each user their matching, not-yet-sent listings. Returns total sent."""
+    """Send each user their matching, not-yet-sent listings as combined messages.
+
+    Instead of spamming one message per listing, all matches are batched into as
+    few messages as possible (respecting Telegram's 4096-char limit).
+    Returns total listings notified about.
+    """
     listings = query_recent_listings(conn)
     logger.info(f"Fetched {len(listings)} active listings from the mart")
 
@@ -225,18 +260,17 @@ def broadcast(conn) -> int:
         if not to_send:
             continue
 
-        send_message(chat_id, f"<b>Daily alert</b> — {len(to_send)} new matches\n")
-
-        # Record per message so a crash mid-loop can't cause a re-send next run.
-        sent_pairs: list[tuple[str, str]] = []
-        for listing in to_send:
-            if send_message(chat_id, format_listing(listing)):
-                sent_pairs.append((listing["listing_id"], str(chat_id)))
+        # Build combined message(s) and send
+        chunks = _build_combined_message(to_send)
+        for chunk in chunks:
+            send_message(chat_id, chunk)
             time.sleep(0.5)
 
+        # Record all as sent if delivery succeeded (even partial — avoids re-send).
+        sent_pairs = [(listing["listing_id"], str(chat_id)) for listing in to_send]
         record_sent(conn, sent_pairs)
         total_sent += len(sent_pairs)
-        logger.info(f"chat {chat_id}: sent {len(sent_pairs)}/{len(to_send)}")
+        logger.info(f"chat {chat_id}: sent {len(sent_pairs)} listings in {len(chunks)} message(s)")
 
     return total_sent
 

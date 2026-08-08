@@ -812,9 +812,25 @@ async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Tolerance → {tol} ({desc})")
 
 
+def is_paid_user(chat_id: int) -> bool:
+    """Check if a user has paid/premium access.
+
+    TODO: Implement real payment verification (e.g. Stripe webhook, DB lookup).
+    For now this is a stub — only the admin has access as a placeholder.
+    """
+    return chat_id == ADMIN_CHAT_ID
+
+
 async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Admin-only: on-demand queries hit the Databricks warehouse directly.
-    if update.effective_chat.id != ADMIN_CHAT_ID:
+    # Paid-user only: on-demand queries hit the Databricks warehouse directly.
+    if not is_paid_user(update.effective_chat.id):
+        await update.message.reply_text(
+            "🔒 <b>/latest is a premium feature</b>\n\n"
+            "On-demand listing queries will be available for paid users.\n"
+            "Stay tuned — this is coming soon!\n\n"
+            "In the meantime, you still receive daily alerts matching your filters.",
+            parse_mode="HTML",
+        )
         return
     log_command(update.effective_chat.id, "latest")
     await update.message.reply_text("🔍 Fetching latest listings...")
@@ -843,20 +859,19 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     count = len(listings)
-    header = f"📋 <b>{count} match{'es' if count != 1 else ''}:</b>"
-    await update.message.reply_text(header, parse_mode="HTML")
 
-    from telegram_bot.notify import format_listing
+    from telegram_bot.notify import _build_combined_message
 
-    for listing in listings[:10]:
+    chunks = _build_combined_message(listings[:10])
+    for chunk in chunks:
         try:
             await update.message.reply_text(
-                format_listing(listing),
+                chunk,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
         except Exception as e:
-            logger.warning(f"Failed to send listing: {e}")
+            logger.warning(f"Failed to send listing chunk: {e}")
             continue
         await asyncio.sleep(0.3)
 
