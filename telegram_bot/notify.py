@@ -8,6 +8,7 @@ producing duplicate alerts.
 """
 
 import html
+import json
 import logging
 import os
 import sys
@@ -16,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
+
+from telegram_bot.filters import DEFAULT_USER_CONFIG, filter_listings
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,17 @@ DATABRICKS_WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
 ALERTS_SENT_TABLE = "job_market.gold.telegram_alerts_sent"
+
+# Load user filter config (shared with bot.py)
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "user_config.json")
+
+
+def load_config() -> dict:
+    """Load user filter config from disk."""
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    return DEFAULT_USER_CONFIG.copy()
 
 
 def get_sql_connection():
@@ -70,7 +84,7 @@ def query_new_listings(conn) -> list[dict]:
               SELECT listing_id FROM {ALERTS_SENT_TABLE}
           )
         ORDER BY posted_date DESC
-        LIMIT 50
+        LIMIT 200
     """
 
     with conn.cursor() as cursor:
@@ -159,6 +173,13 @@ def main():
         ensure_alerts_sent_table(conn)
         listings = query_new_listings(conn)
         logger.info(f"Found {len(listings)} new listings (after dedup)")
+
+        # Apply user's tolerance-based filters
+        config = load_config()
+        listings = filter_listings(listings, config)
+        logger.info(
+            f"After filter: {len(listings)} listings match (tolerance={config.get('tolerance', 1)})"
+        )
 
         if not listings:
             return

@@ -30,6 +30,89 @@ ALERT_FILTERS = {
 
 ALERTS_SENT_TABLE = "job_market.gold.telegram_alerts_sent"
 
+# Default filter config — used when user_config.json doesn't exist.
+# In production, the user sets this via the bot's /tolerance, /tech, etc.
+DEFAULT_FILTER_CONFIG = {
+    "seniorities": ["junior", "mid"],
+    "technologies": [],
+    "categories": [],
+    "workplace_types": [],
+    "employment_types": [],
+    "salary_min": 0,
+    "cities": [],
+    "tolerance": 1,
+}
+
+
+def load_filter_config() -> dict:
+    """Load user filter config if available, otherwise use defaults.
+
+    On Databricks this file won't exist (it lives on the local dev machine),
+    so we fall back to DEFAULT_FILTER_CONFIG.
+    """
+    import json as _json
+
+    config_path = "/Workspace/polish-it-job-market-intelligence/telegram_bot/user_config.json"
+    try:
+        with open(config_path) as f:
+            return _json.load(f)
+    except (FileNotFoundError, OSError):
+        return DEFAULT_FILTER_CONFIG.copy()
+
+
+def match_listing_tolerance(listing: dict, config: dict) -> bool:
+    """Check if listing matches using tolerance logic (same as filters.py)."""
+    tolerance = config.get("tolerance", 1)
+    mismatches = 0
+
+    seniorities = config.get("seniorities", [])
+    if seniorities:
+        listing_sen = (listing.get("seniority") or "").lower()
+        if listing_sen not in seniorities:
+            mismatches += 1
+
+    technologies = config.get("technologies", [])
+    if technologies:
+        listing_techs = set(listing.get("technologies") or [])
+        listing_techs_lower = {t.lower() for t in listing_techs}
+        wanted_lower = {t.lower() for t in technologies}
+        if not listing_techs_lower & wanted_lower:
+            mismatches += 1
+
+    categories = config.get("categories", [])
+    if categories:
+        listing_cat = (listing.get("category") or "").lower()
+        if listing_cat not in [c.lower() for c in categories]:
+            mismatches += 1
+
+    workplace_types = config.get("workplace_types", [])
+    if workplace_types:
+        listing_wp = (listing.get("workplace_type") or "").lower()
+        if listing_wp not in [w.lower() for w in workplace_types]:
+            mismatches += 1
+
+    employment_types = config.get("employment_types", [])
+    if employment_types:
+        listing_emp = (listing.get("employment_type") or "").lower()
+        if listing_emp not in [e.lower() for e in employment_types]:
+            mismatches += 1
+
+    salary_min = config.get("salary_min", 0)
+    if salary_min and salary_min > 0:
+        listing_sal = listing.get("salary_max")
+        if listing_sal is not None and listing_sal < salary_min:
+            mismatches += 1
+
+    cities = config.get("cities", [])
+    if cities:
+        listing_cities = listing.get("cities") or []
+        listing_cities_lower = {c.lower() for c in listing_cities}
+        wanted_cities_lower = {c.lower() for c in cities}
+        if not listing_cities_lower & wanted_cities_lower:
+            mismatches += 1
+
+    return mismatches <= tolerance
+
 
 def check_telegram_connectivity() -> bool:
     try:
@@ -173,13 +256,12 @@ if can_reach:
         )
     except Exception:
         yesterday_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        df = (
-            spark.table("job_market.silver.listings_with_tech")
-            .filter(col("date_collected") >= yesterday_iso)
-            .filter(col("seniority").isin(ALERT_FILTERS["seniorities"]))
+        df = spark.table("job_market.silver.listings_with_tech").filter(
+            col("date_collected") >= yesterday_iso
         )
 
     # Filter: match criteria + not already sent
+    filter_config = load_filter_config()
     matching = []
     for row in df.collect():
         listing = normalize_row(row)
@@ -188,10 +270,13 @@ if can_reach:
             continue
         if lid in sent_ids:
             continue
-        if any(t in listing["technologies"] for t in ALERT_FILTERS["technologies"]):
+        if match_listing_tolerance(listing, filter_config):
             matching.append(listing)
 
-    print(f"Found {len(matching)} new matching listings (after dedup)")
+    print(
+        f"Found {len(matching)} new matching listings "
+        f"(tolerance={filter_config.get('tolerance', 1)}, after dedup)"
+    )
 
     # Send
     if matching:

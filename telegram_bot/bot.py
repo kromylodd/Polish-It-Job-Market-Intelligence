@@ -1,18 +1,27 @@
 """
 Interactive Telegram bot for Polish IT Job Market Intelligence.
 
+Universal bot covering all IT roles with adjustable tolerance matching.
+
 Commands:
-    /start   — Welcome message + quick summary
-    /help    — List available commands
-    /filters — Show current alert filter settings
-    /seniority <levels> — Set seniority filter (e.g. /seniority junior mid)
-    /tech <technologies> — Set technology filter (e.g. /tech Python SQL dbt)
-    /latest  — Fetch most recent matching listings on demand
-    /stats   — Pipeline stats (listings collected, alerts sent)
+    /start      — Welcome + overview
+    /help       — All commands
+    /filters    — Show current filter settings
+    /seniority  — Set seniority filter
+    /tech       — Set technology filter
+    /category   — Set job category filter
+    /workplace  — Set workplace type (remote/hybrid/office)
+    /employment — Set employment type (b2b/uop/uz)
+    /salary     — Set minimum salary
+    /city       — Set city filter
+    /tolerance  — Set how many filters can mismatch
+    /latest     — Get recent matching listings
+    /stats      — Pipeline statistics
 
 Run with: python -m telegram_bot.bot
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -25,76 +34,33 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from telegram_bot.filters import (
+    ALL_CATEGORIES,
+    ALL_EMPLOYMENT_TYPES,
+    ALL_SENIORITIES,
+    ALL_WORKPLACES,
+    DEFAULT_USER_CONFIG,
+    TECH_CATEGORIES,
+    filter_listings,
+)
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
-# User preferences stored in a local JSON file.
-# For a single-user bot this is sufficient; for multi-user, move to a DB.
 CONFIG_PATH = Path(__file__).parent / "user_config.json"
 
-# Expanded default technology filters grouped by category
-TECH_CATEGORIES = {
-    "🐍 Languages": ["Python", "SQL", "Java", "Scala", "Go", "TypeScript"],
-    "📊 Data & Analytics": [
-        "Apache Spark",
-        "Apache Kafka",
-        "Apache Airflow",
-        "dbt",
-        "Pandas",
-        "PySpark",
-    ],
-    "☁️ Cloud & Infra": [
-        "AWS",
-        "Azure",
-        "GCP",
-        "Docker",
-        "Kubernetes",
-        "Terraform",
-    ],
-    "🗄️ Databases": [
-        "PostgreSQL",
-        "MongoDB",
-        "Redis",
-        "Elasticsearch",
-        "Snowflake",
-        "Databricks",
-    ],
-    "🤖 ML & AI": [
-        "TensorFlow",
-        "PyTorch",
-        "MLflow",
-        "scikit-learn",
-        "LLM",
-        "OpenAI",
-    ],
-}
-
-# Flat list of all known techs for validation hints
-ALL_KNOWN_TECHS = [tech for techs in TECH_CATEGORIES.values() for tech in techs]
-
-DEFAULT_CONFIG = {
-    "seniorities": ["junior", "mid"],
-    "technologies": [
-        "Python",
-        "SQL",
-        "Apache Spark",
-        "dbt",
-        "Apache Airflow",
-        "Docker",
-        "AWS",
-        "PostgreSQL",
-        "Pandas",
-        "Kafka",
-    ],
-}
-
-# Command menu shown next to the send button
 BOT_COMMANDS = [
     BotCommand("start", "Welcome + overview"),
-    BotCommand("filters", "View current alert filters"),
-    BotCommand("seniority", "Set seniority filter"),
+    BotCommand("filters", "View all current filters"),
+    BotCommand("seniority", "Set seniority level filter"),
     BotCommand("tech", "Set technology filter"),
+    BotCommand("category", "Set job category filter"),
+    BotCommand("workplace", "Set workplace type (remote/hybrid/office)"),
+    BotCommand("employment", "Set employment type (b2b/uop/uz)"),
+    BotCommand("salary", "Set minimum salary"),
+    BotCommand("city", "Set city filter"),
+    BotCommand("tolerance", "Set filter mismatch tolerance"),
     BotCommand("latest", "Get recent matching listings"),
     BotCommand("stats", "Pipeline statistics"),
     BotCommand("help", "Show all commands"),
@@ -102,132 +68,160 @@ BOT_COMMANDS = [
 
 
 def load_config() -> dict:
-    """Load user config from disk."""
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH) as f:
             return json.load(f)
-    return DEFAULT_CONFIG.copy()
+    return DEFAULT_USER_CONFIG.copy()
 
 
 def save_config(config: dict):
-    """Persist user config to disk."""
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
 
-# --- Command handlers ---
-
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command."""
     text = (
         "👋 <b>Polish IT Job Market Intelligence</b>\n\n"
-        "I send you daily alerts for IT job listings matching your filters "
-        "(seniority, technologies) from justjoin.it.\n\n"
-        "<b>Commands:</b>\n"
-        "📋 /filters — view your current alert settings\n"
-        "🎯 /seniority — change seniority filter\n"
-        "💻 /tech — change technology filter\n"
-        "🔍 /latest — get recent matching listings now\n"
-        "📊 /stats — pipeline statistics\n"
-        "❓ /help — show all commands"
+        "I send you daily alerts for IT job listings from justjoin.it "
+        "matching your personal filters.\n\n"
+        "<b>🎛️ Filter dimensions:</b>\n"
+        "• Seniority (junior/mid/senior/lead)\n"
+        "• Technologies (Python, React, Docker, etc.)\n"
+        "• Category (python, java, devops, data, mobile...)\n"
+        "• Workplace (remote/hybrid/office)\n"
+        "• Employment (B2B/UoP/zlecenie)\n"
+        "• Salary minimum\n"
+        "• City\n\n"
+        "<b>🎯 Tolerance:</b> Set how many filters can mismatch.\n"
+        "E.g. tolerance=1 means if everything matches except one "
+        "filter, the listing still appears.\n\n"
+        "<b>Commands:</b> /help"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /help command."""
     text = (
-        "<b>Available commands:</b>\n\n"
-        "📋 /filters — show current filter settings\n\n"
-        "🎯 /seniority &lt;levels&gt; — set seniority filter\n"
-        "   <i>e.g. /seniority junior mid senior</i>\n\n"
-        "💻 /tech &lt;technologies&gt; — set technology filter\n"
-        "   <i>e.g. /tech Python SQL dbt Airflow</i>\n"
-        "   <i>Use /tech list to see all known technologies</i>\n\n"
-        "🔍 /latest — fetch most recent matching listings\n\n"
-        "📊 /stats — pipeline &amp; alert statistics\n\n"
-        "Filters affect both daily alerts and /latest results."
+        "<b>All commands:</b>\n\n"
+        "📋 /filters — show all active filters\n"
+        "🎯 /seniority — set seniority levels\n"
+        "💻 /tech — set technologies (or /tech list)\n"
+        "📂 /category — set job categories (or /category list)\n"
+        "🏠 /workplace — remote / hybrid / office\n"
+        "📄 /employment — b2b / uop / zlecenie\n"
+        "💰 /salary — minimum salary\n"
+        "🏙️ /city — location filter\n"
+        "⚙️ /tolerance — mismatch tolerance (0=strict)\n"
+        "🔍 /latest — fetch recent matching listings\n"
+        "📊 /stats — pipeline statistics\n\n"
+        "<i>Empty filters = no restriction on that dimension.\n"
+        "Only active filters count toward tolerance.</i>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /filters command — show current settings with nice grouping."""
     config = load_config()
-    seniorities = config.get("seniorities", [])
-    technologies = config.get("technologies", [])
 
-    # Format seniorities with emoji
-    sen_display = " · ".join(s.capitalize() for s in seniorities) if seniorities else "Any"
+    sections = []
+    sections.append("<b>📋 Your Filters</b>\n")
 
-    # Group technologies by category for display
-    tech_lines = []
-    matched_techs = set()
-    for category, techs in TECH_CATEGORIES.items():
-        active = [t for t in techs if t in technologies]
-        if active:
-            tech_lines.append(f"  {category}: {', '.join(active)}")
-            matched_techs.update(active)
+    # Tolerance
+    tol = config.get("tolerance", 1)
+    sections.append(f"⚙️ <b>Tolerance:</b> {tol} mismatch{'es' if tol != 1 else ''} allowed\n")
 
-    # Any techs not in known categories
-    uncategorized = [t for t in technologies if t not in matched_techs]
-    if uncategorized:
-        tech_lines.append(f"  🔧 Other: {', '.join(uncategorized)}")
+    # Seniority
+    sen = config.get("seniorities", [])
+    if sen:
+        display = " · ".join(ALL_SENIORITIES.get(s, s) for s in sen)
+    else:
+        display = "<i>any</i>"
+    sections.append(f"🎯 <b>Seniority:</b> {display}")
 
-    tech_display = "\n".join(tech_lines) if tech_lines else "  Any"
+    # Categories
+    cats = config.get("categories", [])
+    if cats:
+        display = " · ".join(ALL_CATEGORIES.get(c, c) for c in cats)
+    else:
+        display = "<i>any</i>"
+    sections.append(f"📂 <b>Category:</b> {display}")
 
-    text = (
-        "<b>📋 Current Alert Filters</b>\n\n"
-        f"<b>🎯 Seniority:</b> {sen_display}\n\n"
-        f"<b>💻 Technologies:</b>\n{tech_display}\n\n"
-        "<i>Change with /seniority or /tech</i>"
+    # Technologies
+    techs = config.get("technologies", [])
+    if techs:
+        display = ", ".join(techs)
+    else:
+        display = "<i>any</i>"
+    sections.append(f"💻 <b>Technologies:</b> {display}")
+
+    # Workplace
+    wp = config.get("workplace_types", [])
+    if wp:
+        display = " · ".join(ALL_WORKPLACES.get(w, w) for w in wp)
+    else:
+        display = "<i>any</i>"
+    sections.append(f"🏠 <b>Workplace:</b> {display}")
+
+    # Employment
+    emp = config.get("employment_types", [])
+    if emp:
+        display = " · ".join(ALL_EMPLOYMENT_TYPES.get(e, e) for e in emp)
+    else:
+        display = "<i>any</i>"
+    sections.append(f"📄 <b>Employment:</b> {display}")
+
+    # Salary
+    sal = config.get("salary_min", 0)
+    sections.append(
+        f"💰 <b>Min salary:</b> {sal} PLN" if sal else "💰 <b>Min salary:</b> <i>any</i>"
     )
-    await update.message.reply_text(text, parse_mode="HTML")
+
+    # Cities
+    cities = config.get("cities", [])
+    if cities:
+        display = ", ".join(cities)
+    else:
+        display = "<i>any</i>"
+    sections.append(f"🏙️ <b>Cities:</b> {display}")
+
+    await update.message.reply_text("\n".join(sections), parse_mode="HTML")
 
 
 async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /seniority command — set seniority filter."""
     args = context.args
-    valid_levels = {"junior", "mid", "senior", "lead", "manager"}
+    valid = set(ALL_SENIORITIES.keys())
 
     if not args:
         config = load_config()
-        current = " · ".join(s.capitalize() for s in config.get("seniorities", []))
-        levels_display = " | ".join(sorted(valid_levels))
+        current = config.get("seniorities", [])
+        cur_display = " · ".join(ALL_SENIORITIES.get(s, s) for s in current) if current else "any"
+        opts = "\n".join(f"  {v} — {label}" for k, (v, label) in enumerate(ALL_SENIORITIES.items()))
         await update.message.reply_text(
-            f"<b>🎯 Current seniority filter:</b> {current or 'Any'}\n\n"
-            f"<b>Usage:</b> /seniority junior mid senior\n"
-            f"<b>Valid levels:</b> {levels_display}",
+            f"🎯 <b>Current:</b> {cur_display}\n\n"
+            f"<b>Options:</b>\n{opts}\n\n"
+            f"<b>Usage:</b> /seniority junior mid",
             parse_mode="HTML",
         )
         return
 
-    # Normalize and validate
     levels = [a.lower().strip() for a in args]
-    invalid = [lv for lv in levels if lv not in valid_levels]
+    invalid = [lv for lv in levels if lv not in valid]
     if invalid:
         await update.message.reply_text(
-            f"❌ Unknown level(s): {', '.join(invalid)}\n"
-            f"Valid: {', '.join(sorted(valid_levels))}",
+            f"❌ Unknown: {', '.join(invalid)}\nValid: {', '.join(sorted(valid))}"
         )
         return
 
     config = load_config()
     config["seniorities"] = levels
     save_config(config)
-    display = " · ".join(lv.capitalize() for lv in levels)
-    await update.message.reply_text(
-        f"✅ Seniority filter updated:\n🎯 {display}",
-        parse_mode="HTML",
-    )
+    display = " · ".join(ALL_SENIORITIES.get(lv, lv) for lv in levels)
+    await update.message.reply_text(f"✅ Seniority → {display}", parse_mode="HTML")
 
 
 async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /tech command — set technology filter."""
     args = context.args
 
-    # /tech list — show all known technologies by category
     if args and args[0].lower() == "list":
         lines = ["<b>💻 Known Technologies:</b>\n"]
         for category, techs in TECH_CATEGORIES.items():
@@ -237,30 +231,258 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
         return
 
+    if args and args[0].lower() == "clear":
+        config = load_config()
+        config["technologies"] = []
+        save_config(config)
+        await update.message.reply_text("✅ Technology filter cleared (matching any)")
+        return
+
     if not args:
         config = load_config()
-        technologies = config.get("technologies", [])
-        current = ", ".join(technologies) if technologies else "Any"
+        techs = config.get("technologies", [])
+        current = ", ".join(techs) if techs else "any (no filter)"
         await update.message.reply_text(
-            f"<b>💻 Current technology filter:</b>\n{current}\n\n"
-            f"<b>Usage:</b> /tech Python SQL dbt Airflow\n"
-            f"<b>Browse available:</b> /tech list",
+            f"💻 <b>Current:</b> {current}\n\n"
+            f"<b>Usage:</b> /tech Python SQL Docker React\n"
+            f"<b>Browse:</b> /tech list\n"
+            f"<b>Clear:</b> /tech clear",
             parse_mode="HTML",
         )
         return
 
-    # Accept as-is (case-sensitive, tech names are proper nouns)
     config = load_config()
     config["technologies"] = list(args)
     save_config(config)
-    await update.message.reply_text(
-        f"✅ Technology filter updated:\n💻 {', '.join(args)}",
-        parse_mode="HTML",
-    )
+    await update.message.reply_text(f"✅ Technologies → {', '.join(args)}", parse_mode="HTML")
+
+
+async def cmd_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+
+    if args and args[0].lower() == "list":
+        lines = ["<b>📂 Job Categories (from justjoin.it):</b>\n"]
+        for key, label in ALL_CATEGORIES.items():
+            lines.append(f"  <code>{key}</code> — {label}")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    if args and args[0].lower() == "clear":
+        config = load_config()
+        config["categories"] = []
+        save_config(config)
+        await update.message.reply_text("✅ Category filter cleared (matching any)")
+        return
+
+    if not args:
+        config = load_config()
+        cats = config.get("categories", [])
+        current = ", ".join(ALL_CATEGORIES.get(c, c) for c in cats) if cats else "any"
+        await update.message.reply_text(
+            f"📂 <b>Current:</b> {current}\n\n"
+            f"<b>Usage:</b> /category python devops data\n"
+            f"<b>Browse:</b> /category list\n"
+            f"<b>Clear:</b> /category clear",
+            parse_mode="HTML",
+        )
+        return
+
+    valid = set(ALL_CATEGORIES.keys())
+    cats = [a.lower().strip() for a in args]
+    invalid = [c for c in cats if c not in valid]
+    if invalid:
+        await update.message.reply_text(
+            f"❌ Unknown: {', '.join(invalid)}\nUse /category list to see valid options."
+        )
+        return
+
+    config = load_config()
+    config["categories"] = cats
+    save_config(config)
+    display = ", ".join(ALL_CATEGORIES.get(c, c) for c in cats)
+    await update.message.reply_text(f"✅ Categories → {display}", parse_mode="HTML")
+
+
+async def cmd_workplace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+
+    if args and args[0].lower() == "clear":
+        config = load_config()
+        config["workplace_types"] = []
+        save_config(config)
+        await update.message.reply_text("✅ Workplace filter cleared (matching any)")
+        return
+
+    if not args:
+        config = load_config()
+        wp = config.get("workplace_types", [])
+        current = " · ".join(ALL_WORKPLACES.get(w, w) for w in wp) if wp else "any"
+        opts = "\n".join(f"  <code>{k}</code> — {v}" for k, v in ALL_WORKPLACES.items())
+        await update.message.reply_text(
+            f"🏠 <b>Current:</b> {current}\n\n"
+            f"<b>Options:</b>\n{opts}\n\n"
+            f"<b>Usage:</b> /workplace remote hybrid\n"
+            f"<b>Clear:</b> /workplace clear",
+            parse_mode="HTML",
+        )
+        return
+
+    valid = set(ALL_WORKPLACES.keys())
+    types = [a.lower().strip() for a in args]
+    invalid = [t for t in types if t not in valid]
+    if invalid:
+        await update.message.reply_text(
+            f"❌ Unknown: {', '.join(invalid)}\nValid: {', '.join(valid)}"
+        )
+        return
+
+    config = load_config()
+    config["workplace_types"] = types
+    save_config(config)
+    display = " · ".join(ALL_WORKPLACES.get(t, t) for t in types)
+    await update.message.reply_text(f"✅ Workplace → {display}", parse_mode="HTML")
+
+
+async def cmd_employment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+
+    if args and args[0].lower() == "clear":
+        config = load_config()
+        config["employment_types"] = []
+        save_config(config)
+        await update.message.reply_text("✅ Employment filter cleared (matching any)")
+        return
+
+    if not args:
+        config = load_config()
+        emp = config.get("employment_types", [])
+        current = " · ".join(ALL_EMPLOYMENT_TYPES.get(e, e) for e in emp) if emp else "any"
+        opts = "\n".join(f"  <code>{k}</code> — {v}" for k, v in ALL_EMPLOYMENT_TYPES.items())
+        await update.message.reply_text(
+            f"📄 <b>Current:</b> {current}\n\n"
+            f"<b>Options:</b>\n{opts}\n\n"
+            f"<b>Usage:</b> /employment b2b permanent\n"
+            f"<b>Clear:</b> /employment clear",
+            parse_mode="HTML",
+        )
+        return
+
+    valid = set(ALL_EMPLOYMENT_TYPES.keys())
+    types = [a.lower().strip() for a in args]
+    invalid = [t for t in types if t not in valid]
+    if invalid:
+        await update.message.reply_text(
+            f"❌ Unknown: {', '.join(invalid)}\nValid: {', '.join(valid)}"
+        )
+        return
+
+    config = load_config()
+    config["employment_types"] = types
+    save_config(config)
+    display = " · ".join(ALL_EMPLOYMENT_TYPES.get(t, t) for t in types)
+    await update.message.reply_text(f"✅ Employment → {display}", parse_mode="HTML")
+
+
+async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+
+    if args and args[0].lower() == "clear":
+        config = load_config()
+        config["salary_min"] = 0
+        save_config(config)
+        await update.message.reply_text("✅ Salary filter cleared (matching any)")
+        return
+
+    if not args:
+        config = load_config()
+        sal = config.get("salary_min", 0)
+        current = f"{sal} PLN" if sal else "any"
+        await update.message.reply_text(
+            f"💰 <b>Current minimum:</b> {current}\n\n"
+            f"<b>Usage:</b> /salary 8000\n"
+            f"<i>(monthly PLN — listings paying less won't match)</i>\n"
+            f"<b>Clear:</b> /salary clear",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        amount = int(args[0].replace(",", "").replace(".", ""))
+    except ValueError:
+        await update.message.reply_text("❌ Enter a number, e.g. /salary 8000")
+        return
+
+    config = load_config()
+    config["salary_min"] = amount
+    save_config(config)
+    await update.message.reply_text(f"✅ Min salary → {amount} PLN/month")
+
+
+async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+
+    if args and args[0].lower() == "clear":
+        config = load_config()
+        config["cities"] = []
+        save_config(config)
+        await update.message.reply_text("✅ City filter cleared (matching any)")
+        return
+
+    if not args:
+        config = load_config()
+        cities = config.get("cities", [])
+        current = ", ".join(cities) if cities else "any"
+        await update.message.reply_text(
+            f"🏙️ <b>Current:</b> {current}\n\n"
+            f"<b>Usage:</b> /city Warszawa Kraków Remote\n"
+            f"<b>Clear:</b> /city clear",
+            parse_mode="HTML",
+        )
+        return
+
+    config = load_config()
+    config["cities"] = list(args)
+    save_config(config)
+    await update.message.reply_text(f"✅ Cities → {', '.join(args)}")
+
+
+async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+
+    if not args:
+        config = load_config()
+        tol = config.get("tolerance", 1)
+        await update.message.reply_text(
+            f"⚙️ <b>Current tolerance:</b> {tol}\n\n"
+            f"<b>What this means:</b>\n"
+            f"• 0 = strict — ALL active filters must match\n"
+            f"• 1 = one filter can mismatch (recommended)\n"
+            f"• 2 = two filters can mismatch (broader results)\n"
+            f"• 3+ = very loose matching\n\n"
+            f"<b>Example:</b> If you want Python + remote, but tolerance=1,\n"
+            f"a listing with Python + hybrid will still appear.\n\n"
+            f"<b>Usage:</b> /tolerance 1",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        tol = int(args[0])
+        if tol < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Enter a number ≥ 0, e.g. /tolerance 1")
+        return
+
+    config = load_config()
+    config["tolerance"] = tol
+    save_config(config)
+
+    desc = {0: "strict", 1: "flexible", 2: "broad", 3: "very loose"}.get(tol, "ultra loose")
+    await update.message.reply_text(f"✅ Tolerance → {tol} ({desc})")
 
 
 async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /latest — fetch recent listings from local data or Databricks."""
     await update.message.reply_text("🔍 Fetching latest listings...")
 
     config = load_config()
@@ -270,26 +492,24 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"/latest failed: {e}")
         await update.message.reply_text(
-            "⚠️ Failed to fetch listings. The data source may be unavailable.\n"
-            "Try again later or check /stats for pipeline status.",
+            "⚠️ Failed to fetch listings. Data source may be unavailable.\n"
+            "Try again later or check /stats.",
         )
         return
 
     if not listings:
         await update.message.reply_text(
-            "📭 No recent listings match your current filters.\n\n"
-            "This could mean:\n"
-            "• No scrape has run yet (check /stats)\n"
-            "• Your filters are too narrow — try /tech list or /seniority\n"
-            "• No new matching jobs in the last few days",
+            "📭 No recent listings match your filters.\n\n"
+            "Try:\n"
+            "• Increase /tolerance\n"
+            "• Broaden /tech or /category\n"
+            "• Check /stats — maybe no scrape has run yet",
         )
         return
 
     count = len(listings)
-    header = f"📋 <b>{count} recent match{'es' if count != 1 else ''}:</b>"
+    header = f"📋 <b>{count} match{'es' if count != 1 else ''}:</b>"
     await update.message.reply_text(header, parse_mode="HTML")
-
-    import asyncio
 
     from telegram_bot.notify import format_listing
 
@@ -301,13 +521,18 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True,
             )
         except Exception as e:
-            logger.warning(f"Failed to format/send listing: {e}")
+            logger.warning(f"Failed to send listing: {e}")
             continue
         await asyncio.sleep(0.3)
 
+    if count > 10:
+        await update.message.reply_text(
+            f"<i>Showing 10/{count}. Narrow your filters for more relevant results.</i>",
+            parse_mode="HTML",
+        )
+
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /stats — show pipeline statistics."""
     stats = _get_stats()
     text = (
         "<b>📊 Pipeline Statistics</b>\n\n"
@@ -322,8 +547,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _get_latest_listings(config: dict) -> list[dict]:
-    """Try to get listings from Databricks, fall back to local data files."""
-    # Try Databricks first
+    """Try Databricks, fall back to local data files."""
     databricks_host = os.environ.get("DATABRICKS_HOST", "")
     databricks_token = os.environ.get("DATABRICKS_TOKEN", "")
     warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
@@ -332,40 +556,28 @@ def _get_latest_listings(config: dict) -> list[dict]:
         try:
             return _query_databricks_latest(config)
         except Exception as e:
-            logger.warning(f"Databricks query failed, falling back to local: {e}")
+            logger.warning(f"Databricks failed, using local: {e}")
 
-    # Fallback: read from local data/ files
     return _read_local_latest(config)
 
 
 def _query_databricks_latest(config: dict) -> list[dict]:
-    """Query Databricks gold mart for recent matching listings."""
+    """Query Databricks gold mart, apply filter logic in Python."""
     from databricks import sql
 
     host = os.environ["DATABRICKS_HOST"].replace("https://", "")
     warehouse_id = os.environ["DATABRICKS_WAREHOUSE_ID"]
     token = os.environ["DATABRICKS_TOKEN"]
 
-    seniorities = config.get("seniorities", [])
-    technologies = config.get("technologies", [])
-
-    # Build dynamic WHERE clause
-    where_parts = ["posted_date >= CURRENT_DATE - INTERVAL 3 DAYS"]
-    if seniorities:
-        sen_list = ", ".join(f"'{s}'" for s in seniorities)
-        where_parts.append(f"seniority IN ({sen_list})")
-
-    where_clause = " AND ".join(where_parts)
-
-    query = f"""
+    query = """
         SELECT listing_id, title, slug, company_name, seniority,
                employment_type, workplace_type, category,
                salary_min, salary_max, currency,
                posted_date, technologies, cities
         FROM job_market.gold.mart_junior_market_snapshot
-        WHERE {where_clause}
+        WHERE posted_date >= CURRENT_DATE - INTERVAL 3 DAYS
         ORDER BY posted_date DESC
-        LIMIT 20
+        LIMIT 100
     """
 
     with sql.connect(
@@ -378,20 +590,12 @@ def _query_databricks_latest(config: dict) -> list[dict]:
             columns = [desc[0] for desc in cursor.description]
             rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-    # Filter by technologies in Python (array contains is tricky in SQL)
-    if technologies:
-        rows = [
-            r
-            for r in rows
-            if isinstance(r.get("technologies"), list)
-            and any(t in r["technologies"] for t in technologies)
-        ]
-
-    return rows
+    # Apply tolerance-based filter
+    return filter_listings(rows, config)[:20]
 
 
 def _read_local_latest(config: dict) -> list[dict]:
-    """Read the most recent local data file and filter."""
+    """Read most recent local data file and filter."""
     data_dir = Path(__file__).parent.parent / "data"
     if not data_dir.exists():
         return []
@@ -404,31 +608,12 @@ def _read_local_latest(config: dict) -> list[dict]:
         data = json.load(f)
 
     listings = data.get("listings", [])
-    technologies = config.get("technologies", [])
-    seniorities = config.get("seniorities", [])
-
-    # Filter
-    results = []
-    for listing in listings[:100]:
-        seniority = listing.get("seniority", "").lower()
-        if seniorities and seniority not in seniorities:
-            continue
-        techs = listing.get("technologies", [])
-        if isinstance(techs, list) and technologies:
-            if not any(t in techs for t in technologies):
-                continue
-        results.append(listing)
-        if len(results) >= 20:
-            break
-
-    return results
+    return filter_listings(listings[:200], config)[:20]
 
 
 def _get_stats() -> dict:
-    """Gather basic pipeline stats."""
     stats = {}
 
-    # Count local data files
     data_dir = Path(__file__).parent.parent / "data"
     if data_dir.exists():
         files = list(data_dir.glob("raw_listings_*.json"))
@@ -442,7 +627,6 @@ def _get_stats() -> dict:
         stats["raw_files"] = 0
         stats["last_scrape"] = "No data yet"
 
-    # Try to count alerts from Databricks
     try:
         from databricks import sql
 
@@ -459,21 +643,23 @@ def _get_stats() -> dict:
                     cursor.execute("SELECT COUNT(*) FROM job_market.gold.telegram_alerts_sent")
                     stats["alerts_sent"] = cursor.fetchone()[0]
         else:
-            stats["alerts_sent"] = "N/A (no DB connection)"
+            stats["alerts_sent"] = "N/A (no DB)"
     except Exception:
         stats["alerts_sent"] = "N/A (DB unavailable)"
 
     return stats
 
 
+# --- Bot setup ---
+
+
 async def post_init(application: Application):
-    """Register command menu with Telegram after bot starts."""
+    """Register command menu with Telegram."""
     await application.bot.set_my_commands(BOT_COMMANDS)
     logger.info("Bot command menu registered")
 
 
 def main():
-    """Start the bot with long-polling."""
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
@@ -484,12 +670,17 @@ def main():
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
-    # Register command handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("filters", cmd_filters))
     app.add_handler(CommandHandler("seniority", cmd_seniority))
     app.add_handler(CommandHandler("tech", cmd_tech))
+    app.add_handler(CommandHandler("category", cmd_category))
+    app.add_handler(CommandHandler("workplace", cmd_workplace))
+    app.add_handler(CommandHandler("employment", cmd_employment))
+    app.add_handler(CommandHandler("salary", cmd_salary))
+    app.add_handler(CommandHandler("city", cmd_city))
+    app.add_handler(CommandHandler("tolerance", cmd_tolerance))
     app.add_handler(CommandHandler("latest", cmd_latest))
     app.add_handler(CommandHandler("stats", cmd_stats))
 
