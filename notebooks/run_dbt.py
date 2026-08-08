@@ -147,14 +147,15 @@ result = subprocess.run(
 
 print(result.stdout)
 if result.returncode != 0:
+    print("=== dbt build STDOUT (tail) ===")
+    print(result.stdout[-4000:])
     print("=== dbt build STDERR ===")
     print(result.stderr)
-    print("=== END STDERR ===")
-    # Also exit with the error so it shows in API get-output
-    try:
-        dbutils.notebook.exit(f"FAILED: {result.stderr[-2000:]}")  # noqa: F821
-    except Exception:
-        pass
-    raise RuntimeError(f"dbt build failed (exit {result.returncode})")
+    print("=== END ===")
+    # NOTE: do NOT call dbutils.notebook.exit() here. notebook.exit() terminates
+    # the notebook as a SUCCESS, which would mask a real dbt failure and let the
+    # downstream tasks (and GitHub Actions) report green while the marts never
+    # built. Raising makes the task fail visibly, as it should.
+    raise RuntimeError(f"dbt build failed (exit {result.returncode}). See STDOUT/STDERR above.")
 
 print("dbt build completed successfully")

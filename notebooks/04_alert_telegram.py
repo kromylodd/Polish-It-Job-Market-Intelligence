@@ -14,7 +14,7 @@ from urllib.parse import quote
 import requests
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
-from pyspark.sql.types import LongType, StringType, StructField, StructType, TimestampType
+from pyspark.sql.types import StringType, StructField, StructType, TimestampType
 
 spark = SparkSession.builder.getOrCreate()
 
@@ -175,7 +175,7 @@ def ensure_alerts_sent_table_exists():
     spark.sql(
         f"""
         CREATE TABLE IF NOT EXISTS {ALERTS_SENT_TABLE} (
-            listing_id BIGINT,
+            listing_id STRING,
             chat_id STRING,
             sent_at TIMESTAMP
         )
@@ -202,7 +202,7 @@ def record_sent_pairs(pairs: list):
     now = datetime.now(timezone.utc)
     schema = StructType(
         [
-            StructField("listing_id", LongType(), False),
+            StructField("listing_id", StringType(), False),
             StructField("chat_id", StringType(), True),
             StructField("sent_at", TimestampType(), False),
         ]

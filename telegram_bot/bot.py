@@ -1095,7 +1095,6 @@ def _query_databricks_latest(config: dict) -> list[dict]:
                salary_min, salary_max, currency,
                posted_date, technologies, cities
         FROM job_market.gold.mart_junior_market_snapshot
-        WHERE posted_date >= CURRENT_DATE - INTERVAL 3 DAYS
         ORDER BY posted_date DESC
         LIMIT 100
     """
@@ -1108,7 +1107,10 @@ def _query_databricks_latest(config: dict) -> list[dict]:
         with conn.cursor() as cursor:
             cursor.execute(query)
             columns = [desc[0] for desc in cursor.description]
-            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            rows = [
+                {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in zip(columns, row)}
+                for row in cursor.fetchall()
+            ]
 
     # Apply tolerance-based filter
     return filter_listings(rows, config)[:20]

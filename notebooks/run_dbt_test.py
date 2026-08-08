@@ -115,14 +115,13 @@ result = subprocess.run(
 
 print(result.stdout)
 if result.returncode != 0:
+    print("=== dbt test STDOUT (tail) ===")
+    print(result.stdout[-4000:])
     print("=== dbt test STDERR ===")
     print(result.stderr)
-    print("=== END STDERR ===")
-    try:
-        _msg = f"FAILED: stdout={result.stdout[-1000:]} | stderr={result.stderr[-1000:]}"
-        dbutils.notebook.exit(_msg)  # noqa: F821
-    except Exception:
-        pass
-    raise RuntimeError(f"dbt test failed (exit {result.returncode})")
+    print("=== END ===")
+    # Do NOT dbutils.notebook.exit() on failure — it would mark the task SUCCESS
+    # and mask failing data tests. Raise so the failure is visible.
+    raise RuntimeError(f"dbt test failed (exit {result.returncode}). See STDOUT/STDERR above.")
 
 print("dbt test completed successfully")

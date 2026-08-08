@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import requests
@@ -38,11 +38,6 @@ DATABRICKS_WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
 ALERTS_SENT_TABLE = "job_market.gold.telegram_alerts_sent"
-
-# How far back to look for listings. Wider than the daily cadence so that a late
-# or failed pipeline run doesn't cause listings to age out before they're ever
-# sent — the per-(listing, chat) idempotency log prevents duplicates.
-LOOKBACK_DAYS = 3
 
 # Max listings to send to a single user per run.
 MAX_PER_USER = 20
@@ -89,7 +84,7 @@ def ensure_alerts_sent_table(conn):
         cursor.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {ALERTS_SENT_TABLE} (
-                listing_id BIGINT,
+                listing_id STRING,
                 chat_id STRING,
                 sent_at TIMESTAMP
             )
@@ -104,34 +99,43 @@ def ensure_alerts_sent_table(conn):
 
 
 def query_recent_listings(conn) -> list[dict]:
-    """Query gold mart for recently-posted listings (dedup is applied per-user)."""
-    since = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    """Query the gold mart snapshot of active listings.
 
+    We intentionally do NOT filter by ``posted_date``: justjoin's posted_date is
+    the original posting date (often weeks old), so a recency window would return
+    almost nothing. Novelty ("what to alert") is defined by the per-(listing, chat)
+    idempotency log instead, so each user is alerted about a given listing once.
+    """
     query = """
         SELECT listing_id, title, slug, company_name, seniority,
                employment_type, workplace_type, category,
                salary_min, salary_max, currency,
                posted_date, technologies, cities
         FROM job_market.gold.mart_junior_market_snapshot
-        WHERE posted_date >= %(since)s
         ORDER BY posted_date DESC
         LIMIT 500
     """
 
     with conn.cursor() as cursor:
-        cursor.execute(query, {"since": since})
+        cursor.execute(query)
         columns = [desc[0] for desc in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        return [_normalize_row(dict(zip(columns, row))) for row in cursor.fetchall()]
 
 
-def get_already_sent_pairs(conn) -> set[tuple[int, str]]:
+def _normalize_row(row: dict) -> dict:
+    """Convert array columns (returned as numpy arrays by the SQL connector) to
+    plain Python lists so downstream filtering/formatting behaves correctly."""
+    return {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in row.items()}
+
+
+def get_already_sent_pairs(conn) -> set[tuple[str, str]]:
     """Return the set of (listing_id, chat_id) that have already been notified."""
     with conn.cursor() as cursor:
         cursor.execute(f"SELECT listing_id, chat_id FROM {ALERTS_SENT_TABLE}")
         return {(row[0], row[1]) for row in cursor.fetchall()}
 
 
-def record_sent(conn, pairs: list[tuple[int, str]]):
+def record_sent(conn, pairs: list[tuple[str, str]]):
     """Insert (listing_id, chat_id) pairs into the idempotency log (parameterized)."""
     if not pairs:
         return
@@ -201,7 +205,7 @@ def send_message(chat_id: str, text: str) -> bool:
 def broadcast(conn) -> int:
     """Send each user their matching, not-yet-sent listings. Returns total sent."""
     listings = query_recent_listings(conn)
-    logger.info(f"Fetched {len(listings)} recent listings (last {LOOKBACK_DAYS}d)")
+    logger.info(f"Fetched {len(listings)} active listings from the mart")
 
     already_sent = get_already_sent_pairs(conn)
     user_configs = load_all_user_configs()
@@ -224,7 +228,7 @@ def broadcast(conn) -> int:
         send_message(chat_id, f"<b>Daily alert</b> — {len(to_send)} new matches\n")
 
         # Record per message so a crash mid-loop can't cause a re-send next run.
-        sent_pairs: list[tuple[int, str]] = []
+        sent_pairs: list[tuple[str, str]] = []
         for listing in to_send:
             if send_message(chat_id, format_listing(listing)):
                 sent_pairs.append((listing["listing_id"], str(chat_id)))

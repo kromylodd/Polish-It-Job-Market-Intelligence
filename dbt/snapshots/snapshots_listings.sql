@@ -28,7 +28,9 @@ select
     workplace_type,
     array_min(transform(salary_variants, v -> v.salary_min)) as salary_min,
     array_max(transform(salary_variants, v -> v.salary_max)) as salary_max,
-    element_at(salary_variants, 1).currency as currency,
+    case
+        when size(salary_variants) > 0 then element_at(salary_variants, 1).currency
+    end as currency,
     case
         when try_cast(expiry_date as timestamp) is not null
              and try_cast(expiry_date as timestamp) < current_timestamp()
