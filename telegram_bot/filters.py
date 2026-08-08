@@ -184,11 +184,11 @@ ALL_KNOWN_TECHS = [tech for techs in TECH_CATEGORIES.values() for tech in techs]
 # --- Default user config ---
 
 DEFAULT_USER_CONFIG = {
-    "seniorities": ["junior", "mid"],
+    "seniorities": ["junior", "mid", "senior", "lead", "manager"],
     "technologies": [],  # Empty = don't filter on tech (show all)
-    "categories": [],  # Empty = don't filter on category (show all)
-    "workplace_types": [],  # Empty = any
-    "employment_types": [],  # Empty = any
+    "categories": list(ALL_CATEGORIES.keys()),  # All enabled by default
+    "workplace_types": ["remote", "hybrid", "office"],  # All enabled
+    "employment_types": ["b2b", "permanent", "mandate_contract", "any"],  # All enabled
     "salary_min": 0,  # 0 = no minimum
     "cities": [],  # Empty = any location
     "tolerance": 1,  # How many dimensions can mismatch
