@@ -34,7 +34,13 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from telegram_bot.analytics import get_analytics_summary, log_command, log_filter_choice
+from telegram_bot.analytics import (
+    get_analytics_summary,
+    is_opted_out,
+    log_command,
+    log_filter_choice,
+    set_opt_out,
+)
 from telegram_bot.filters import (
     ALL_CATEGORIES,
     ALL_EMPLOYMENT_TYPES,
@@ -574,7 +580,11 @@ async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summary = get_analytics_summary()
 
     lines = ["<b>📊 Bot Usage Analytics</b>\n"]
-    lines.append(f"👥 Unique users: {summary['total_users']}")
+    lines.append(f"👥 Total users: {summary['total_users']}")
+    lines.append(
+        f"   (📊 tracking: {summary['total_users'] - summary.get('opted_out_users', 0)}"
+        f" · 🔒 opted out: {summary.get('opted_out_users', 0)})"
+    )
     lines.append(f"📨 Total interactions: {summary['total_events']}\n")
 
     # Command usage
@@ -631,23 +641,56 @@ async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show privacy/data collection info."""
+    """Show privacy/data collection info with opt-out toggle."""
     log_command(update.effective_chat.id, "privacy")
+    args = context.args
+    chat_id = update.effective_chat.id
+
+    # Handle toggle: /privacy off or /privacy on
+    if args and args[0].lower() in ("off", "disable", "optout"):
+        set_opt_out(chat_id, True)
+        await update.message.reply_text(
+            "✅ <b>Data collection disabled.</b>\n\n"
+            "Only your existence as a user (+1 count) is tracked.\n"
+            "No commands, filter preferences, or usage patterns are recorded.\n\n"
+            "Re-enable anytime: /privacy on",
+            parse_mode="HTML",
+        )
+        return
+
+    if args and args[0].lower() in ("on", "enable", "optin"):
+        set_opt_out(chat_id, False)
+        await update.message.reply_text(
+            "✅ <b>Data collection enabled.</b>\n\n"
+            "Anonymous usage stats will be collected to help improve the bot.\n"
+            "Thank you for helping! 🙏\n\n"
+            "Disable anytime: /privacy off",
+            parse_mode="HTML",
+        )
+        return
+
+    # Show info
+    opted_out = is_opted_out(chat_id)
+    status = "🔴 Disabled" if opted_out else "🟢 Enabled"
+
     text = (
         "<b>🔒 Privacy &amp; Data Collection</b>\n\n"
-        "This bot collects <b>anonymous usage statistics</b> to improve "
-        "the service and understand what the IT job market needs.\n\n"
-        "<b>What is collected:</b>\n"
+        f"<b>Your status:</b> {status}\n\n"
+        "This bot collects <b>anonymous usage statistics</b> to understand "
+        "what the Polish IT market needs and improve the service.\n\n"
+        "<b>When enabled, we track:</b>\n"
         "• Which commands are used (and how often)\n"
         "• Which filters are popular (technologies, categories, cities)\n"
-        "• Total unique user count\n\n"
-        "<b>What is NOT collected:</b>\n"
+        "• This helps us know what features to build next\n\n"
+        "<b>When disabled, we only track:</b>\n"
+        "• +1 to the total user count (nothing else)\n\n"
+        "<b>Never collected (regardless of setting):</b>\n"
         "• Your name, username, or any personal info\n"
-        "• Your chat ID (it's hashed one-way before storage)\n"
-        "• Message content\n"
-        "• Your specific filter combinations\n\n"
-        "<b>Storage:</b> Local SQLite database on the bot server.\n"
-        "Data is never shared with third parties.\n\n"
+        "• Your chat ID (hashed one-way before storage)\n"
+        "• Message content or specific filter combinations\n\n"
+        "<b>Toggle:</b>\n"
+        "  /privacy off — disable detailed tracking\n"
+        "  /privacy on — re-enable (helps improve the bot! 🙏)\n\n"
         "View aggregated stats: /analytics"
     )
     await update.message.reply_text(text, parse_mode="HTML")
