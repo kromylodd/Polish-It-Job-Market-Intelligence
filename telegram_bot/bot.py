@@ -27,9 +27,10 @@ import logging
 import os
 from pathlib import Path
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -131,72 +132,301 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_command(update.effective_chat.id, "filters")
     config = load_config()
+    await _send_filters_menu(update.message, config)
 
-    sections = []
-    sections.append("<b>📋 Your Filters</b>\n")
 
-    # Tolerance
+async def _send_filters_menu(message, config: dict):
+    """Send the filters overview with an inline keyboard for editing."""
+    sections = ["<b>📋 Your Filters</b>\n"]
+
     tol = config.get("tolerance", 1)
-    sections.append(
-        f"⚙️ <b>Tolerance:</b> {tol} mismatch{'es' if tol != 1 else ''} allowed" f"  · /tolerance\n"
+    sections.append(f"⚙️ Tolerance: {tol} mismatch{'es' if tol != 1 else ''} allowed\n")
+
+    sen = config.get("seniorities", [])
+    display = " · ".join(ALL_SENIORITIES.get(s, s) for s in sen) if sen else "any"
+    sections.append(f"🎯 Seniority: {display}")
+
+    cats = config.get("categories", [])
+    display = " · ".join(ALL_CATEGORIES.get(c, c) for c in cats) if cats else "any"
+    sections.append(f"📂 Category: {display}")
+
+    techs = config.get("technologies", [])
+    display = ", ".join(techs[:6]) + ("…" if len(techs) > 6 else "") if techs else "any"
+    sections.append(f"💻 Tech: {display}")
+
+    wp = config.get("workplace_types", [])
+    display = " · ".join(ALL_WORKPLACES.get(w, w) for w in wp) if wp else "any"
+    sections.append(f"🏠 Workplace: {display}")
+
+    emp = config.get("employment_types", [])
+    display = " · ".join(ALL_EMPLOYMENT_TYPES.get(e, e) for e in emp) if emp else "any"
+    sections.append(f"📄 Employment: {display}")
+
+    sal = config.get("salary_min", 0)
+    sections.append(f"💰 Min salary: {sal} PLN" if sal else "💰 Min salary: any")
+
+    cities = config.get("cities", [])
+    display = ", ".join(cities) if cities else "any"
+    sections.append(f"🏙️ Cities: {display}")
+
+    sections.append("\n<i>Tap a button to edit:</i>")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🎯 Seniority", callback_data="menu_seniority"),
+            InlineKeyboardButton("📂 Category", callback_data="menu_category"),
+        ],
+        [
+            InlineKeyboardButton("💻 Tech", callback_data="menu_tech"),
+            InlineKeyboardButton("🏠 Workplace", callback_data="menu_workplace"),
+        ],
+        [
+            InlineKeyboardButton("📄 Employment", callback_data="menu_employment"),
+            InlineKeyboardButton("💰 Salary", callback_data="menu_salary"),
+        ],
+        [
+            InlineKeyboardButton("🏙️ City", callback_data="menu_city"),
+            InlineKeyboardButton("⚙️ Tolerance", callback_data="menu_tolerance"),
+        ],
+    ]
+
+    await message.reply_text(
+        "\n".join(sections),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-    # Seniority
+
+async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard presses from the filters menu."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    config = load_config()
+
+    if data == "menu_seniority":
+        await _show_toggle_picker(
+            query.message, config, "seniorities", ALL_SENIORITIES, "🎯 Seniority", "sen"
+        )
+    elif data == "menu_category":
+        await _show_toggle_picker(
+            query.message, config, "categories", ALL_CATEGORIES, "📂 Category", "cat"
+        )
+    elif data == "menu_workplace":
+        await _show_toggle_picker(
+            query.message, config, "workplace_types", ALL_WORKPLACES, "🏠 Workplace", "wp"
+        )
+    elif data == "menu_employment":
+        await _show_toggle_picker(
+            query.message, config, "employment_types", ALL_EMPLOYMENT_TYPES, "📄 Employment", "emp"
+        )
+    elif data == "menu_tolerance":
+        await _show_tolerance_picker(query.message, config)
+    elif data == "menu_tech":
+        await query.message.edit_text(
+            "💻 <b>Technologies</b>\n\n"
+            "Type /tech followed by your choices:\n"
+            "<code>/tech Python SQL Docker React</code>\n\n"
+            "Browse all: /tech list\nClear: /tech clear",
+            parse_mode="HTML",
+        )
+    elif data == "menu_salary":
+        await query.message.edit_text(
+            "💰 <b>Minimum salary</b>\n\n"
+            "Type /salary followed by amount:\n"
+            "<code>/salary 10000</code>\n\nClear: /salary clear",
+            parse_mode="HTML",
+        )
+    elif data == "menu_city":
+        await query.message.edit_text(
+            "🏙️ <b>Cities</b>\n\n"
+            "Type /city followed by names:\n"
+            "<code>/city Warszawa Kraków Wrocław</code>\n\nClear: /city clear",
+            parse_mode="HTML",
+        )
+    elif data.startswith("toggle_"):
+        await _handle_toggle(query, config, data)
+    elif data.startswith("set_tol_"):
+        tol = int(data[8:])
+        config["tolerance"] = tol
+        save_config(config)
+        await _show_tolerance_picker(query.message, config, edit=True)
+    elif data == "back_filters":
+        # Re-render the main filters menu in place
+        config = load_config()
+        await _edit_filters_menu(query.message, config)
+
+
+async def _edit_filters_menu(message, config: dict):
+    """Edit existing message to show filters menu."""
+    sections = ["<b>📋 Your Filters</b>\n"]
+
+    tol = config.get("tolerance", 1)
+    sections.append(f"⚙️ Tolerance: {tol} mismatch{'es' if tol != 1 else ''} allowed\n")
+
     sen = config.get("seniorities", [])
-    if sen:
-        display = " · ".join(ALL_SENIORITIES.get(s, s) for s in sen)
-    else:
-        display = "<i>any</i>"
-    sections.append(f"🎯 <b>Seniority:</b> {display}  · /seniority")
+    display = " · ".join(ALL_SENIORITIES.get(s, s) for s in sen) if sen else "any"
+    sections.append(f"🎯 Seniority: {display}")
 
-    # Categories
     cats = config.get("categories", [])
-    if cats:
-        display = " · ".join(ALL_CATEGORIES.get(c, c) for c in cats)
-    else:
-        display = "<i>any</i>"
-    sections.append(f"📂 <b>Category:</b> {display}  · /category")
+    display = " · ".join(ALL_CATEGORIES.get(c, c) for c in cats) if cats else "any"
+    sections.append(f"📂 Category: {display}")
 
-    # Technologies
     techs = config.get("technologies", [])
-    if techs:
-        display = ", ".join(techs)
-    else:
-        display = "<i>any</i>"
-    sections.append(f"💻 <b>Technologies:</b> {display}  · /tech")
+    display = ", ".join(techs[:6]) + ("…" if len(techs) > 6 else "") if techs else "any"
+    sections.append(f"💻 Tech: {display}")
 
-    # Workplace
     wp = config.get("workplace_types", [])
-    if wp:
-        display = " · ".join(ALL_WORKPLACES.get(w, w) for w in wp)
-    else:
-        display = "<i>any</i>"
-    sections.append(f"🏠 <b>Workplace:</b> {display}  · /workplace")
+    display = " · ".join(ALL_WORKPLACES.get(w, w) for w in wp) if wp else "any"
+    sections.append(f"🏠 Workplace: {display}")
 
-    # Employment
     emp = config.get("employment_types", [])
-    if emp:
-        display = " · ".join(ALL_EMPLOYMENT_TYPES.get(e, e) for e in emp)
-    else:
-        display = "<i>any</i>"
-    sections.append(f"📄 <b>Employment:</b> {display}  · /employment")
+    display = " · ".join(ALL_EMPLOYMENT_TYPES.get(e, e) for e in emp) if emp else "any"
+    sections.append(f"📄 Employment: {display}")
 
-    # Salary
     sal = config.get("salary_min", 0)
-    sal_display = f"{sal} PLN" if sal else "<i>any</i>"
-    sections.append(f"💰 <b>Min salary:</b> {sal_display}  · /salary")
+    sections.append(f"💰 Min salary: {sal} PLN" if sal else "💰 Min salary: any")
 
-    # Cities
     cities = config.get("cities", [])
-    if cities:
-        display = ", ".join(cities)
+    display = ", ".join(cities) if cities else "any"
+    sections.append(f"🏙️ Cities: {display}")
+
+    sections.append("\n<i>Tap a button to edit:</i>")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🎯 Seniority", callback_data="menu_seniority"),
+            InlineKeyboardButton("📂 Category", callback_data="menu_category"),
+        ],
+        [
+            InlineKeyboardButton("💻 Tech", callback_data="menu_tech"),
+            InlineKeyboardButton("🏠 Workplace", callback_data="menu_workplace"),
+        ],
+        [
+            InlineKeyboardButton("📄 Employment", callback_data="menu_employment"),
+            InlineKeyboardButton("💰 Salary", callback_data="menu_salary"),
+        ],
+        [
+            InlineKeyboardButton("🏙️ City", callback_data="menu_city"),
+            InlineKeyboardButton("⚙️ Tolerance", callback_data="menu_tolerance"),
+        ],
+    ]
+
+    await message.edit_text(
+        "\n".join(sections),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _handle_toggle(query, config: dict, data: str):
+    """Toggle a value and refresh the picker."""
+    # Parse: toggle_sen_junior, toggle_cat_python, toggle_wp_remote, toggle_emp_b2b
+    parts = data.split("_", 2)  # ['toggle', 'sen', 'junior']
+    prefix = parts[1]
+    value = parts[2]
+
+    key_map = {
+        "sen": "seniorities",
+        "cat": "categories",
+        "wp": "workplace_types",
+        "emp": "employment_types",
+    }
+    options_map = {
+        "sen": ALL_SENIORITIES,
+        "cat": ALL_CATEGORIES,
+        "wp": ALL_WORKPLACES,
+        "emp": ALL_EMPLOYMENT_TYPES,
+    }
+    label_map = {
+        "sen": "🎯 Seniority",
+        "cat": "📂 Category",
+        "wp": "🏠 Workplace",
+        "emp": "📄 Employment",
+    }
+    dim_map = {"sen": "seniority", "cat": "category", "wp": "workplace", "emp": "employment"}
+
+    key = key_map[prefix]
+    current = config.get(key, [])
+
+    if value in current:
+        current.remove(value)
     else:
-        display = "<i>any</i>"
-    sections.append(f"🏙️ <b>Cities:</b> {display}  · /city")
+        current.append(value)
+    config[key] = current
+    save_config(config)
 
-    sections.append("\n<i>Tap any /command to edit that filter.</i>")
+    log_filter_choice(query.message.chat.id, dim_map[prefix], current)
 
-    await update.message.reply_text("\n".join(sections), parse_mode="HTML")
+    # Refresh picker in place
+    await _show_toggle_picker(
+        query.message, config, key, options_map[prefix], label_map[prefix], prefix, edit=True
+    )
+
+
+async def _show_toggle_picker(
+    message, config: dict, key: str, options: dict, title: str, prefix: str, edit: bool = False
+):
+    """Show a toggle picker for any list-based filter."""
+    current = config.get(key, [])
+    keyboard = []
+
+    items = list(options.items())
+    # Use 2-column layout for categories (many items), single column for others
+    if len(items) > 6:
+        for i in range(0, len(items), 2):
+            row = []
+            for k, label in items[i : i + 2]:
+                check = "✅" if k in current else "⬜"
+                short = label.split(" ", 1)[1] if " " in label else label
+                row.append(
+                    InlineKeyboardButton(f"{check} {short}", callback_data=f"toggle_{prefix}_{k}")
+                )
+            keyboard.append(row)
+    else:
+        for k, label in items:
+            check = "✅" if k in current else "⬜"
+            keyboard.append(
+                [InlineKeyboardButton(f"{check} {label}", callback_data=f"toggle_{prefix}_{k}")]
+            )
+
+    keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_filters")])
+
+    text = f"<b>{title}</b> — tap to toggle:\n\n<i>✅ = active, ⬜ = off</i>"
+    if edit:
+        await message.edit_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await message.edit_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+async def _show_tolerance_picker(message, config: dict, edit: bool = False):
+    """Show tolerance radio buttons."""
+    current = config.get("tolerance", 1)
+    options = [
+        (0, "Strict (all must match)"),
+        (1, "Flexible (1 mismatch ok)"),
+        (2, "Broad (2 mismatches ok)"),
+        (3, "Very loose (3 mismatches ok)"),
+    ]
+    keyboard = []
+    for val, label in options:
+        check = "🔘" if val == current else "⚪"
+        keyboard.append([InlineKeyboardButton(f"{check} {label}", callback_data=f"set_tol_{val}")])
+    keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_filters")])
+
+    text = "⚙️ <b>Tolerance</b> — how many filters can mismatch:"
+    if edit:
+        await message.edit_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await message.edit_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -698,6 +928,63 @@ async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /feedback — users can send suggestions or complaints."""
+    log_command(update.effective_chat.id, "feedback")
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            "💬 <b>Feedback</b>\n\n"
+            "Have a suggestion, bug report, or complaint?\n\n"
+            "<b>Usage:</b>\n"
+            "<code>/feedback Your message here</code>\n\n"
+            "<i>Your feedback is sent anonymously to the bot admin.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Store feedback
+    feedback_text = " ".join(args)
+    _save_feedback(update.effective_chat.id, feedback_text)
+
+    # Forward to admin
+    if ADMIN_CHAT_ID:
+        from telegram import Bot
+
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        try:
+            await bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"💬 <b>New feedback:</b>\n\n{feedback_text}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass  # Don't fail the user's command if admin notify fails
+
+    await update.message.reply_text(
+        "✅ Thanks for your feedback! It's been sent to the admin.\n\n"
+        "<i>We read every message and use it to improve the bot.</i>",
+        parse_mode="HTML",
+    )
+
+
+def _save_feedback(chat_id: int, text: str):
+    """Save feedback to analytics DB."""
+    from datetime import datetime, timezone
+
+    from telegram_bot.analytics import _get_conn, _hash_user
+
+    conn = _get_conn()
+    now = datetime.now(timezone.utc).isoformat()
+    user_hash = _hash_user(chat_id)
+    conn.execute(
+        "INSERT INTO events (timestamp, user_hash, event_type, event_data) VALUES (?, ?, ?, ?)",
+        (now, user_hash, "feedback", text),
+    )
+    conn.commit()
+
+
 # --- Data helpers ---
 
 
@@ -840,6 +1127,8 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("analytics", cmd_analytics))
     app.add_handler(CommandHandler("privacy", cmd_privacy))
+    app.add_handler(CommandHandler("feedback", cmd_feedback))
+    app.add_handler(CallbackQueryHandler(_callback_filters))
 
     logger.info("Bot starting (long-polling)...")
     app.run_polling(drop_pending_updates=True)
