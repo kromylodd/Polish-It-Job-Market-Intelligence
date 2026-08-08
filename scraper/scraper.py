@@ -40,6 +40,20 @@ def create_session() -> requests.Session:
     return session
 
 
+# Upper bound so a hostile/misconfigured Retry-After can't stall the job for hours.
+MAX_RETRY_AFTER_SECONDS = 120.0
+
+
+def _parse_retry_after(response: requests.Response) -> float:
+    """Parse a 429 Retry-After header (seconds form), with a sane fallback/cap."""
+    raw = response.headers.get("Retry-After", "")
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        seconds = REQUEST_DELAY_SECONDS * 5
+    return max(0.0, min(seconds, MAX_RETRY_AFTER_SECONDS))
+
+
 def fetch_page(
     session: requests.Session,
     from_offset: int = 0,
@@ -57,6 +71,20 @@ def fetch_page(
     for attempt in range(MAX_RETRIES):
         try:
             response = session.get(BASE_URL, params=params, timeout=30)
+            # Respect explicit rate limiting from the API.
+            if response.status_code == 429:
+                retry_after = _parse_retry_after(response)
+                logger.warning(
+                    "Rate limited (429) at offset %s; waiting %.1fs (attempt %d/%d)",
+                    from_offset,
+                    retry_after,
+                    attempt + 1,
+                    MAX_RETRIES,
+                )
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(retry_after)
+                    continue
+                return None
             response.raise_for_status()
             return response.json()
         except requests.RequestException as e:

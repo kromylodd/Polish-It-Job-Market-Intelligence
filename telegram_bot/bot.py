@@ -22,9 +22,11 @@ Run with: python -m telegram_bot.bot
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -35,6 +37,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from telegram_bot import config_store
 from telegram_bot.analytics import (
     get_analytics_summary,
     is_opted_out,
@@ -55,9 +58,27 @@ from telegram_bot.filters import (
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-ADMIN_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))
 
-CONFIG_PATH = Path(__file__).parent / "user_config.json"
+
+def _parse_admin_chat_id() -> int:
+    """Parse the admin chat id from env, tolerating malformed values."""
+    raw = os.environ.get("TELEGRAM_CHAT_ID", "0")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning("TELEGRAM_CHAT_ID is not an integer (%r); admin commands disabled", raw)
+        return 0
+
+
+ADMIN_CHAT_ID = _parse_admin_chat_id()
+
+# Serializes read-modify-write cycles on the shared config file within this process.
+_config_lock = threading.Lock()
+
+# Coalesce bursts of filter edits into fewer Volume uploads.
+PUBLISH_DEBOUNCE_SECONDS = 5.0
+_publish_dirty = False
+_publish_task: asyncio.Task | None = None
 
 BOT_COMMANDS = [
     BotCommand("start", "Welcome + overview"),
@@ -69,16 +90,52 @@ BOT_COMMANDS = [
 ]
 
 
-def load_config() -> dict:
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return DEFAULT_USER_CONFIG.copy()
+def load_config(chat_id: int) -> dict:
+    """Load a single user's config, merged over defaults. Never mutates shared state."""
+    with _config_lock:
+        all_configs = config_store.load_local()
+    merged = copy.deepcopy(DEFAULT_USER_CONFIG)
+    user_cfg = all_configs.get(str(chat_id))
+    if isinstance(user_cfg, dict):
+        merged.update(user_cfg)
+    return merged
 
 
-def save_config(config: dict):
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2)
+def save_config(chat_id: int, config: dict):
+    """Persist a single user's config atomically, then mirror to the Volume."""
+    with _config_lock:
+        all_configs = config_store.load_local()
+        all_configs[str(chat_id)] = config
+        config_store.save_local(all_configs)
+    _schedule_volume_publish()
+
+
+def _schedule_volume_publish():
+    """Request a (debounced, background) mirror of the local config to the Volume.
+
+    No-op when there's no running event loop (e.g. in tests) — the local file is
+    always authoritative, so skipping the mirror is safe.
+    """
+    global _publish_dirty, _publish_task
+    _publish_dirty = True
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if _publish_task is None or _publish_task.done():
+        _publish_task = loop.create_task(_volume_publish_worker())
+
+
+async def _volume_publish_worker():
+    """Upload the local config to the Volume, coalescing rapid successive edits."""
+    global _publish_dirty
+    await asyncio.sleep(PUBLISH_DEBOUNCE_SECONDS)
+    while _publish_dirty:
+        _publish_dirty = False
+        snapshot = config_store.load_local()
+        ok = await asyncio.to_thread(config_store.upload_to_volume, snapshot)
+        if not ok:
+            logger.debug("Volume publish skipped/failed; local copy remains authoritative")
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -87,7 +144,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Log default preferences for new users so they count in statistics
     if is_new:
         chat_id = update.effective_chat.id
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         log_filter_choice(chat_id, "seniority", config.get("seniorities", []))
         log_filter_choice(chat_id, "category", config.get("categories", []))
         log_filter_choice(chat_id, "workplace", config.get("workplace_types", []))
@@ -140,12 +197,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_command(update.effective_chat.id, "filters")
-    config = load_config()
+    config = load_config(update.effective_chat.id)
     await _send_filters_menu(update.message, config)
 
 
-async def _send_filters_menu(message, config: dict):
-    """Send the filters overview with an inline keyboard for editing."""
+def _build_filters_view(config: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Build the filters overview text + inline keyboard (shared by send/edit)."""
     sections = ["<b>📋 Your Filters</b>\n"]
 
     tol = config.get("tolerance", 1)
@@ -198,12 +255,13 @@ async def _send_filters_menu(message, config: dict):
             InlineKeyboardButton("⚙️ Tolerance", callback_data="menu_tolerance"),
         ],
     ]
+    return "\n".join(sections), InlineKeyboardMarkup(keyboard)
 
-    await message.reply_text(
-        "\n".join(sections),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+
+async def _send_filters_menu(message, config: dict):
+    """Send the filters overview with an inline keyboard for editing."""
+    text, keyboard = _build_filters_view(config)
+    await message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -211,7 +269,8 @@ async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    config = load_config()
+    chat_id = update.effective_chat.id
+    config = load_config(chat_id)
 
     if data == "menu_seniority":
         await _show_toggle_picker(
@@ -254,81 +313,24 @@ async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
     elif data.startswith("toggle_"):
-        await _handle_toggle(query, config, data)
+        await _handle_toggle(query, chat_id, config, data)
     elif data.startswith("set_tol_"):
         tol = int(data[8:])
         config["tolerance"] = tol
-        save_config(config)
+        save_config(chat_id, config)
         await _show_tolerance_picker(query.message, config, edit=True)
     elif data == "back_filters":
         # Re-render the main filters menu in place
-        config = load_config()
-        await _edit_filters_menu(query.message, config)
+        await _edit_filters_menu(query.message, load_config(chat_id))
 
 
 async def _edit_filters_menu(message, config: dict):
     """Edit existing message to show filters menu."""
-    sections = ["<b>📋 Your Filters</b>\n"]
-
-    tol = config.get("tolerance", 1)
-    sections.append(f"⚙️ Tolerance: {tol} mismatch{'es' if tol != 1 else ''} allowed\n")
-
-    sen = config.get("seniorities", [])
-    display = " · ".join(ALL_SENIORITIES.get(s, s) for s in sen) if sen else "any"
-    sections.append(f"🎯 Seniority: {display}")
-
-    cats = config.get("categories", [])
-    display = " · ".join(ALL_CATEGORIES.get(c, c) for c in cats) if cats else "any"
-    sections.append(f"📂 Category: {display}")
-
-    techs = config.get("technologies", [])
-    display = ", ".join(techs[:6]) + ("…" if len(techs) > 6 else "") if techs else "any"
-    sections.append(f"💻 Tech: {display}")
-
-    wp = config.get("workplace_types", [])
-    display = " · ".join(ALL_WORKPLACES.get(w, w) for w in wp) if wp else "any"
-    sections.append(f"🏠 Workplace: {display}")
-
-    emp = config.get("employment_types", [])
-    display = " · ".join(ALL_EMPLOYMENT_TYPES.get(e, e) for e in emp) if emp else "any"
-    sections.append(f"📄 Employment: {display}")
-
-    sal = config.get("salary_min", 0)
-    sections.append(f"💰 Min salary: {sal} PLN" if sal else "💰 Min salary: any")
-
-    cities = config.get("cities", [])
-    display = ", ".join(cities) if cities else "any"
-    sections.append(f"🏙️ Cities: {display}")
-
-    sections.append("\n<i>Tap a button to edit:</i>")
-
-    keyboard = [
-        [
-            InlineKeyboardButton("🎯 Seniority", callback_data="menu_seniority"),
-            InlineKeyboardButton("📂 Category", callback_data="menu_category"),
-        ],
-        [
-            InlineKeyboardButton("💻 Tech", callback_data="menu_tech"),
-            InlineKeyboardButton("🏠 Workplace", callback_data="menu_workplace"),
-        ],
-        [
-            InlineKeyboardButton("📄 Employment", callback_data="menu_employment"),
-            InlineKeyboardButton("💰 Salary", callback_data="menu_salary"),
-        ],
-        [
-            InlineKeyboardButton("🏙️ City", callback_data="menu_city"),
-            InlineKeyboardButton("⚙️ Tolerance", callback_data="menu_tolerance"),
-        ],
-    ]
-
-    await message.edit_text(
-        "\n".join(sections),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    text, keyboard = _build_filters_view(config)
+    await message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
-async def _handle_toggle(query, config: dict, data: str):
+async def _handle_toggle(query, chat_id: int, config: dict, data: str):
     """Toggle a value and refresh the picker."""
     # Parse: toggle_sen_junior, toggle_cat_python, toggle_wp_remote, toggle_emp_b2b
     parts = data.split("_", 2)  # ['toggle', 'sen', 'junior']
@@ -365,11 +367,11 @@ async def _handle_toggle(query, config: dict, data: str):
         current.append(value)
         was_added = True
     config[key] = current
-    save_config(config)
+    save_config(chat_id, config)
 
     # Only log when a filter is enabled (tracks what users want, not what they remove)
     if was_added:
-        log_filter_choice(query.message.chat.id, dim_map[prefix], [value])
+        log_filter_choice(chat_id, dim_map[prefix], [value])
 
     # Refresh picker in place
     await _show_toggle_picker(
@@ -380,7 +382,11 @@ async def _handle_toggle(query, config: dict, data: str):
 async def _show_toggle_picker(
     message, config: dict, key: str, options: dict, title: str, prefix: str, edit: bool = False
 ):
-    """Show a toggle picker for any list-based filter."""
+    """Show a toggle picker for any list-based filter.
+
+    Always edits the message in place (invoked from a callback query), so the
+    ``edit`` flag is accepted for call-site clarity but does not change behavior.
+    """
     current = config.get(key, [])
     keyboard = []
 
@@ -406,18 +412,11 @@ async def _show_toggle_picker(
     keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_filters")])
 
     text = f"<b>{title}</b> — tap to toggle:\n\n<i>✅ = active, ⬜ = off</i>"
-    if edit:
-        await message.edit_text(
-            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        await message.edit_text(
-            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    await message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def _show_tolerance_picker(message, config: dict, edit: bool = False):
-    """Show tolerance radio buttons."""
+    """Show tolerance radio buttons (always edits in place)."""
     current = config.get("tolerance", 1)
     options = [
         (0, "Strict (all must match)"),
@@ -432,14 +431,7 @@ async def _show_tolerance_picker(message, config: dict, edit: bool = False):
     keyboard.append([InlineKeyboardButton("◀️ Back", callback_data="back_filters")])
 
     text = "⚙️ <b>Tolerance</b> — how many filters can mismatch:"
-    if edit:
-        await message.edit_text(
-            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        await message.edit_text(
-            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    await message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -448,10 +440,10 @@ async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
     valid = set(ALL_SENIORITIES.keys())
 
     if not args:
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         current = config.get("seniorities", [])
         cur_display = " · ".join(ALL_SENIORITIES.get(s, s) for s in current) if current else "any"
-        opts = "\n".join(f"  {v} — {label}" for k, (v, label) in enumerate(ALL_SENIORITIES.items()))
+        opts = "\n".join(f"  {key} — {label}" for key, label in ALL_SENIORITIES.items())
         await update.message.reply_text(
             f"🎯 <b>Current:</b> {cur_display}\n\n"
             f"<b>Options:</b>\n{opts}\n\n"
@@ -468,9 +460,9 @@ async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    config = load_config()
+    config = load_config(update.effective_chat.id)
     config["seniorities"] = levels
-    save_config(config)
+    save_config(update.effective_chat.id, config)
     log_filter_choice(update.effective_chat.id, "seniority", levels)
     display = " · ".join(ALL_SENIORITIES.get(lv, lv) for lv in levels)
     await update.message.reply_text(f"✅ Seniority → {display}", parse_mode="HTML")
@@ -490,14 +482,14 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if args and args[0].lower() == "clear":
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         config["technologies"] = []
-        save_config(config)
+        save_config(update.effective_chat.id, config)
         await update.message.reply_text("✅ Technology filter cleared (matching any)")
         return
 
     if not args:
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         techs = config.get("technologies", [])
         current = ", ".join(techs) if techs else "any (no filter)"
         await update.message.reply_text(
@@ -509,9 +501,9 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    config = load_config()
+    config = load_config(update.effective_chat.id)
     config["technologies"] = list(args)
-    save_config(config)
+    save_config(update.effective_chat.id, config)
     log_filter_choice(update.effective_chat.id, "technology", list(args))
     await update.message.reply_text(f"✅ Technologies → {', '.join(args)}", parse_mode="HTML")
 
@@ -528,14 +520,14 @@ async def cmd_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if args and args[0].lower() == "clear":
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         config["categories"] = []
-        save_config(config)
+        save_config(update.effective_chat.id, config)
         await update.message.reply_text("✅ Category filter cleared (matching any)")
         return
 
     if not args:
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         cats = config.get("categories", [])
         current = ", ".join(ALL_CATEGORIES.get(c, c) for c in cats) if cats else "any"
         await update.message.reply_text(
@@ -556,9 +548,9 @@ async def cmd_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    config = load_config()
+    config = load_config(update.effective_chat.id)
     config["categories"] = cats
-    save_config(config)
+    save_config(update.effective_chat.id, config)
     log_filter_choice(update.effective_chat.id, "category", cats)
     display = ", ".join(ALL_CATEGORIES.get(c, c) for c in cats)
     await update.message.reply_text(f"✅ Categories → {display}", parse_mode="HTML")
@@ -569,14 +561,14 @@ async def cmd_workplace(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
 
     if args and args[0].lower() == "clear":
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         config["workplace_types"] = []
-        save_config(config)
+        save_config(update.effective_chat.id, config)
         await update.message.reply_text("✅ Workplace filter cleared (matching any)")
         return
 
     if not args:
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         wp = config.get("workplace_types", [])
         current = " · ".join(ALL_WORKPLACES.get(w, w) for w in wp) if wp else "any"
         opts = "\n".join(f"  <code>{k}</code> — {v}" for k, v in ALL_WORKPLACES.items())
@@ -598,9 +590,9 @@ async def cmd_workplace(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    config = load_config()
+    config = load_config(update.effective_chat.id)
     config["workplace_types"] = types
-    save_config(config)
+    save_config(update.effective_chat.id, config)
     log_filter_choice(update.effective_chat.id, "workplace", types)
     display = " · ".join(ALL_WORKPLACES.get(t, t) for t in types)
     await update.message.reply_text(f"✅ Workplace → {display}", parse_mode="HTML")
@@ -611,14 +603,14 @@ async def cmd_employment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
 
     if args and args[0].lower() == "clear":
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         config["employment_types"] = []
-        save_config(config)
+        save_config(update.effective_chat.id, config)
         await update.message.reply_text("✅ Employment filter cleared (matching any)")
         return
 
     if not args:
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         emp = config.get("employment_types", [])
         current = " · ".join(ALL_EMPLOYMENT_TYPES.get(e, e) for e in emp) if emp else "any"
         opts = "\n".join(f"  <code>{k}</code> — {v}" for k, v in ALL_EMPLOYMENT_TYPES.items())
@@ -640,9 +632,9 @@ async def cmd_employment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    config = load_config()
+    config = load_config(update.effective_chat.id)
     config["employment_types"] = types
-    save_config(config)
+    save_config(update.effective_chat.id, config)
     log_filter_choice(update.effective_chat.id, "employment", types)
     display = " · ".join(ALL_EMPLOYMENT_TYPES.get(t, t) for t in types)
     await update.message.reply_text(f"✅ Employment → {display}", parse_mode="HTML")
@@ -653,14 +645,14 @@ async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
 
     if args and args[0].lower() == "clear":
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         config["salary_min"] = 0
-        save_config(config)
+        save_config(update.effective_chat.id, config)
         await update.message.reply_text("✅ Salary filter cleared (matching any)")
         return
 
     if not args:
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         sal = config.get("salary_min", 0)
         current = f"{sal} PLN" if sal else "any"
         await update.message.reply_text(
@@ -678,9 +670,9 @@ async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Enter a number, e.g. /salary 8000")
         return
 
-    config = load_config()
+    config = load_config(update.effective_chat.id)
     config["salary_min"] = amount
-    save_config(config)
+    save_config(update.effective_chat.id, config)
     await update.message.reply_text(f"✅ Min salary → {amount} PLN/month")
 
 
@@ -689,23 +681,22 @@ async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
 
     if args and args[0].lower() == "clear":
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         config["cities"] = []
-        save_config(config)
+        save_config(update.effective_chat.id, config)
         await update.message.reply_text("✅ City filter cleared (matching any location)")
         return
 
     if args and args[0].lower() == "remove":
-        # /city remove Kraków — remove specific cities
-        to_remove = [a for a in args[1:]]
+        to_remove = list(args[1:])  # /city remove Kraków — remove specific cities
         if not to_remove:
             await update.message.reply_text("Usage: /city remove Kraków Gdańsk")
             return
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         current = config.get("cities", [])
         removed = [c for c in to_remove if c in current]
         config["cities"] = [c for c in current if c not in to_remove]
-        save_config(config)
+        save_config(update.effective_chat.id, config)
         if removed:
             remaining = ", ".join(config["cities"]) if config["cities"] else "any"
             await update.message.reply_text(
@@ -728,7 +719,7 @@ async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not args:
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         cities = config.get("cities", [])
         current = ", ".join(cities) if cities else "any (all locations)"
         await update.message.reply_text(
@@ -745,7 +736,7 @@ async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Additive: add new cities to existing list
     from telegram_bot.filters import KNOWN_CITIES
 
-    config = load_config()
+    config = load_config(update.effective_chat.id)
     current = config.get("cities", [])
 
     added = []
@@ -770,7 +761,7 @@ async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 warnings.append(f"⚠️ '{city}' not in known cities (added anyway)")
 
     config["cities"] = current + added
-    save_config(config)
+    save_config(update.effective_chat.id, config)
     if added:
         log_filter_choice(update.effective_chat.id, "city", added)
 
@@ -789,7 +780,7 @@ async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
 
     if not args:
-        config = load_config()
+        config = load_config(update.effective_chat.id)
         tol = config.get("tolerance", 1)
         await update.message.reply_text(
             f"⚙️ <b>Current tolerance:</b> {tol}\n\n"
@@ -813,22 +804,26 @@ async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Enter a number ≥ 0, e.g. /tolerance 1")
         return
 
-    config = load_config()
+    config = load_config(update.effective_chat.id)
     config["tolerance"] = tol
-    save_config(config)
+    save_config(update.effective_chat.id, config)
 
     desc = {0: "strict", 1: "flexible", 2: "broad", 3: "very loose"}.get(tol, "ultra loose")
     await update.message.reply_text(f"✅ Tolerance → {tol} ({desc})")
 
 
 async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Admin-only: on-demand queries hit the Databricks warehouse directly.
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
     log_command(update.effective_chat.id, "latest")
     await update.message.reply_text("🔍 Fetching latest listings...")
 
-    config = load_config()
+    config = load_config(update.effective_chat.id)
 
     try:
-        listings = _get_latest_listings(config)
+        # Databricks / file I/O is blocking — keep it off the event loop.
+        listings = await asyncio.to_thread(_get_latest_listings, config)
     except Exception as e:
         logger.error(f"/latest failed: {e}")
         await update.message.reply_text(
@@ -877,7 +872,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_CHAT_ID:
         return
     log_command(update.effective_chat.id, "stats")
-    stats = _get_stats()
+    stats = await asyncio.to_thread(_get_stats)
     text = (
         "<b>📊 Pipeline Statistics</b>\n\n"
         f"📁 Raw files scraped: {stats.get('raw_files', 'N/A')}\n"
@@ -999,10 +994,14 @@ async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• This helps us know what features to build next\n\n"
         "<b>When disabled, we only track:</b>\n"
         "• +1 to the total user count (nothing else)\n\n"
-        "<b>Never collected (regardless of setting):</b>\n"
-        "• Your name, username, or any personal info\n"
-        "• Your chat ID (hashed one-way before storage)\n"
-        "• Message content or specific filter combinations\n\n"
+        "<b>How your identity is protected:</b>\n"
+        "• Your chat ID is hashed (salted HMAC-SHA256) before storage —\n"
+        "  the raw ID is never written to disk\n"
+        "• No name, username, or profile info is ever collected\n"
+        "• Regular command/filter usage never stores message text\n\n"
+        "<b>One exception — /feedback:</b>\n"
+        "• Text you send via /feedback is stored and forwarded to the admin\n"
+        "  (that's the whole point of the command), so don't include secrets\n\n"
         "<b>Toggle:</b>\n"
         "  /privacy off — disable detailed tracking\n"
         "  /privacy on — re-enable (helps improve the bot! 🙏)"
@@ -1030,13 +1029,10 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     feedback_text = " ".join(args)
     _save_feedback(update.effective_chat.id, feedback_text)
 
-    # Forward to admin
+    # Forward to admin (reuse the running bot instance)
     if ADMIN_CHAT_ID:
-        from telegram import Bot
-
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
         try:
-            await bot.send_message(
+            await context.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
                 text=f"💬 <b>New feedback:</b>\n\n{feedback_text}",
                 parse_mode="HTML",
@@ -1178,8 +1174,17 @@ def _get_stats() -> dict:
 
 
 async def post_init(application: Application):
-    """Register command menu with Telegram."""
+    """Register command menu with Telegram and seed config from the Volume."""
     await application.bot.set_my_commands(BOT_COMMANDS)
+
+    # On a fresh host with no local config, pull the last-published copy from the
+    # Volume so users don't lose their filters when the bot moves machines.
+    if not config_store.LOCAL_PATH.exists() and config_store.volume_enabled():
+        remote = await asyncio.to_thread(config_store.download_from_volume)
+        if remote:
+            config_store.save_local(remote)
+            logger.info("Seeded local user config from Volume (%d users)", len(remote))
+
     logger.info("Bot command menu registered")
 
 

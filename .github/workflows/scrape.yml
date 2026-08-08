@@ -41,25 +41,52 @@ jobs:
           python -m scraper.uploader "$LATEST_FILE"
 
       # Fallback: trigger Databricks Workflow via API since file-arrival
-      # triggers don't work on Free Edition.
-      - name: Trigger Databricks Workflow
+      # triggers don't work on Free Edition, then poll the run to completion so
+      # the notify job only starts once gold data is actually ready.
+      - name: Trigger Databricks Workflow and wait
         if: success()
         run: |
+          set -euo pipefail
           if [ -z "${DATABRICKS_JOB_ID}" ]; then
             echo "DATABRICKS_JOB_ID secret is not set" >&2
             exit 1
           fi
-          curl -sS --fail-with-body -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
+
+          RUN_ID=$(curl -sS --fail-with-body -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
             -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"job_id\": ${DATABRICKS_JOB_ID}}"
+            -d "{\"job_id\": ${DATABRICKS_JOB_ID}}" | python -c 'import sys,json; print(json.load(sys.stdin)["run_id"])')
+          echo "Triggered Databricks run_id=${RUN_ID}"
 
-  # Telegram notifications (runs after pipeline completes)
+          # Poll run status until terminal (max ~20 min).
+          DEADLINE=$(( $(date +%s) + 1200 ))
+          while true; do
+            RESP=$(curl -sS --fail-with-body \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              "${DATABRICKS_HOST}/api/2.1/jobs/runs/get?run_id=${RUN_ID}")
+            LIFECYCLE=$(echo "$RESP" | python -c 'import sys,json; print(json.load(sys.stdin)["state"]["life_cycle_state"])')
+            RESULT=$(echo "$RESP" | python -c 'import sys,json; print(json.load(sys.stdin)["state"].get("result_state",""))')
+            echo "run ${RUN_ID}: ${LIFECYCLE} ${RESULT}"
+            case "$LIFECYCLE" in
+              TERMINATED|SKIPPED|INTERNAL_ERROR)
+                if [ "$RESULT" != "SUCCESS" ]; then
+                  echo "Databricks run did not succeed (result=${RESULT})" >&2
+                  exit 1
+                fi
+                break
+                ;;
+            esac
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "Timed out waiting for Databricks run ${RUN_ID}" >&2
+              exit 1
+            fi
+            sleep 20
+          done
+
+  # Telegram notifications (runs after the pipeline has completed)
   notify:
     runs-on: ubuntu-latest
     needs: scrape-and-upload
-    # Add a delay to wait for Databricks pipeline to finish
-    # TODO: Replace with a proper wait/poll mechanism once pipeline timing is known
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -77,10 +104,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install requests databricks-sql-connector
-
-      - name: Wait for pipeline
-        run: sleep 300  # 5 min — pipeline typically completes in ~4 min
+        run: pip install requests databricks-sql-connector databricks-sdk
 
       - name: Send Telegram notifications
         run: python -m telegram_bot.notify

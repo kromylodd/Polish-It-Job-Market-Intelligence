@@ -14,7 +14,7 @@ from urllib.parse import quote
 import requests
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
-from pyspark.sql.types import LongType, StructField, StructType, TimestampType
+from pyspark.sql.types import LongType, StringType, StructField, StructType, TimestampType
 
 spark = SparkSession.builder.getOrCreate()
 
@@ -22,11 +22,6 @@ spark = SparkSession.builder.getOrCreate()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
-ALERT_FILTERS = {
-    "seniorities": ["junior", "mid"],
-    "technologies": ["Python", "SQL", "Apache Spark", "dbt", "Apache Airflow"],
-}
 
 ALERTS_SENT_TABLE = "job_market.gold.telegram_alerts_sent"
 
@@ -44,39 +39,52 @@ DEFAULT_FILTER_CONFIG = {
 }
 
 
-def load_filter_config() -> dict:
-    """Load user filter config if available, otherwise use defaults.
+def _import_shared_matcher():
+    """Prefer the canonical matcher from telegram_bot.filters so this notebook
+    can never drift from the bot / GitHub Actions path.
 
-    On Databricks this file won't exist (it lives on the local dev machine),
-    so we fall back to DEFAULT_FILTER_CONFIG.
+    The bundle deploys the whole repo under .../<target>/files, so adding that
+    root to sys.path lets us import the shared module. If the import fails for
+    any reason we fall back to the inline mirror below.
     """
-    import json as _json
+    import sys
 
-    config_path = "/Workspace/polish-it-job-market-intelligence/telegram_bot/user_config.json"
+    target = os.environ.get("DATABRICKS_BUNDLE_TARGET", "prod")
     try:
-        with open(config_path) as f:
-            return _json.load(f)
-    except (FileNotFoundError, OSError):
-        return DEFAULT_FILTER_CONFIG.copy()
+        user = spark.sql("SELECT current_user()").collect()[0][0]
+        root = f"/Workspace/Users/{user}/.bundle/polish-it-job-market-intelligence/{target}/files"
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from telegram_bot.filters import match_listing
+
+        print("Using shared matcher from telegram_bot.filters")
+        return lambda listing, config: match_listing(listing, config)[0]
+    except Exception as e:  # pragma: no cover - depends on workspace layout
+        print(f"Shared matcher unavailable ({e}); using inline fallback")
+        return _match_listing_fallback
 
 
-def match_listing_tolerance(listing: dict, config: dict) -> bool:
-    """Check if listing matches using tolerance logic (same as filters.py)."""
+def _match_listing_fallback(listing: dict, config: dict) -> bool:
+    """Inline mirror of telegram_bot.filters.match_listing.
+
+    MUST stay in sync with filters.py. Operates on the flat dict produced by
+    normalize_row (gold-schema fields), so it is behaviorally equivalent to the
+    shared implementation for the fields present here.
+    """
     tolerance = config.get("tolerance", 1)
     mismatches = 0
 
     seniorities = config.get("seniorities", [])
     if seniorities:
         listing_sen = (listing.get("seniority") or "").lower()
-        if listing_sen not in seniorities:
+        if listing_sen not in [s.lower() for s in seniorities]:
             mismatches += 1
 
     technologies = config.get("technologies", [])
     if technologies:
-        listing_techs = set(listing.get("technologies") or [])
-        listing_techs_lower = {t.lower() for t in listing_techs}
-        wanted_lower = {t.lower() for t in technologies}
-        if not listing_techs_lower & wanted_lower:
+        listing_techs = {t.lower() for t in (listing.get("technologies") or [])}
+        wanted = {t.lower() for t in technologies}
+        if not listing_techs & wanted:
             mismatches += 1
 
     categories = config.get("categories", [])
@@ -94,24 +102,63 @@ def match_listing_tolerance(listing: dict, config: dict) -> bool:
     employment_types = config.get("employment_types", [])
     if employment_types:
         listing_emp = (listing.get("employment_type") or "").lower()
-        if listing_emp not in [e.lower() for e in employment_types]:
+        if listing_emp and listing_emp not in [e.lower() for e in employment_types]:
             mismatches += 1
 
     salary_min = config.get("salary_min", 0)
     if salary_min and salary_min > 0:
         listing_sal = listing.get("salary_max")
+        # Undisclosed salary -> benefit of the doubt (no mismatch), matching filters.py.
         if listing_sal is not None and listing_sal < salary_min:
             mismatches += 1
 
     cities = config.get("cities", [])
     if cities:
-        listing_cities = listing.get("cities") or []
-        listing_cities_lower = {c.lower() for c in listing_cities}
-        wanted_cities_lower = {c.lower() for c in cities}
-        if not listing_cities_lower & wanted_cities_lower:
+        listing_cities = {c.lower() for c in (listing.get("cities") or [])}
+        wanted_cities = {c.lower() for c in cities}
+        if not listing_cities & wanted_cities:
             mismatches += 1
 
     return mismatches <= tolerance
+
+
+match_listing_tolerance = _import_shared_matcher()
+
+
+def load_user_configs() -> dict:
+    """Load the {chat_id: config} store published by the bot to the Volume.
+
+    Volumes are FUSE-mounted at /Volumes on Databricks compute, so we can read
+    the file directly. Falls back to default filters for the admin chat if the
+    file is missing/unreadable (e.g. before the bot has ever published).
+    """
+    import json as _json
+
+    path = os.environ.get(
+        "USER_CONFIG_VOLUME_PATH",
+        "/Volumes/job_market/bronze/raw_listings/_config/user_config.json",
+    )
+    try:
+        with open(path) as f:
+            data = _json.load(f)
+        # Ignore the legacy flat shape; only accept a real per-user store.
+        if (
+            isinstance(data, dict)
+            and data
+            and "tolerance" not in data
+            and "seniorities" not in data
+        ):
+            return {
+                cid: {**DEFAULT_FILTER_CONFIG, **cfg}
+                for cid, cfg in data.items()
+                if isinstance(cfg, dict)
+            }
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+
+    if TELEGRAM_CHAT_ID:
+        return {TELEGRAM_CHAT_ID: DEFAULT_FILTER_CONFIG.copy()}
+    return {}
 
 
 def check_telegram_connectivity() -> bool:
@@ -124,35 +171,43 @@ def check_telegram_connectivity() -> bool:
 
 
 def ensure_alerts_sent_table_exists():
-    """Create the idempotency log table if it doesn't exist."""
+    """Create the idempotency log table if it doesn't exist, migrating old layout."""
     spark.sql(
         f"""
         CREATE TABLE IF NOT EXISTS {ALERTS_SENT_TABLE} (
             listing_id BIGINT,
+            chat_id STRING,
             sent_at TIMESTAMP
         )
         USING DELTA
     """
     )
+    # Older tables were (listing_id, sent_at); add chat_id if missing.
+    try:
+        spark.sql(f"ALTER TABLE {ALERTS_SENT_TABLE} ADD COLUMNS (chat_id STRING)")
+    except Exception:
+        pass
 
 
-def get_already_sent_ids() -> set[int]:
-    """Return listing_ids that have already been notified."""
-    return {row.listing_id for row in spark.table(ALERTS_SENT_TABLE).select("listing_id").collect()}
+def get_already_sent_pairs() -> set:
+    """Return (listing_id, chat_id) pairs that have already been notified."""
+    rows = spark.table(ALERTS_SENT_TABLE).select("listing_id", "chat_id").collect()
+    return {(row.listing_id, row.chat_id) for row in rows}
 
 
-def record_sent_ids(listing_ids: list[int]):
-    """Write successfully-sent listing_ids to the idempotency log."""
-    if not listing_ids:
+def record_sent_pairs(pairs: list):
+    """Write successfully-sent (listing_id, chat_id) pairs to the idempotency log."""
+    if not pairs:
         return
     now = datetime.now(timezone.utc)
     schema = StructType(
         [
             StructField("listing_id", LongType(), False),
+            StructField("chat_id", StringType(), True),
             StructField("sent_at", TimestampType(), False),
         ]
     )
-    rows = [(lid, now) for lid in listing_ids]
+    rows = [(lid, cid, now) for (lid, cid) in pairs]
     spark.createDataFrame(rows, schema).write.mode("append").saveAsTable(ALERTS_SENT_TABLE)
 
 
@@ -217,11 +272,11 @@ def format_listing(listing: dict) -> str:
     )
 
 
-def send_message(text: str) -> bool:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+def send_message(chat_id: str, text: str) -> bool:
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
         return False
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
@@ -245,7 +300,7 @@ if not can_reach:
 if can_reach:
     # Ensure idempotency log exists
     ensure_alerts_sent_table_exists()
-    sent_ids = get_already_sent_ids()
+    sent_pairs = get_already_sent_pairs()
 
     # Query new listings
     yesterday_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -260,35 +315,39 @@ if can_reach:
             col("date_collected") >= yesterday_iso
         )
 
-    # Filter: match criteria + not already sent
-    filter_config = load_filter_config()
-    matching = []
-    for row in df.collect():
-        listing = normalize_row(row)
-        lid = listing.get("listing_id")
-        if lid is None:
-            continue
-        if lid in sent_ids:
-            continue
-        if match_listing_tolerance(listing, filter_config):
-            matching.append(listing)
+    normalized = [normalize_row(row) for row in df.collect()]
+    normalized = [n for n in normalized if n.get("listing_id") is not None]
 
-    print(
-        f"Found {len(matching)} new matching listings "
-        f"(tolerance={filter_config.get('tolerance', 1)}, after dedup)"
-    )
+    # Recipients + their filters come from the shared config store on the Volume
+    # (published by the bot). Falls back to the admin chat with default filters.
+    recipients = load_user_configs()
 
-    # Send
-    if matching:
-        send_message(f"<b>Daily alert</b> — {len(matching)} new matches\n")
-        successfully_sent: list[int] = []
+    total_sent = 0
+    for chat_id, config in recipients.items():
+        matching = [
+            listing
+            for listing in normalized
+            if (listing["listing_id"], str(chat_id)) not in sent_pairs
+            and match_listing_tolerance(listing, config)
+        ]
+
+        print(
+            f"chat {chat_id}: {len(matching)} new matching listings "
+            f"(tolerance={config.get('tolerance', 1)}, after dedup)"
+        )
+
+        if not matching:
+            continue
+
+        send_message(chat_id, f"<b>Daily alert</b> — {len(matching)} new matches\n")
+        newly_sent = []
         for m in matching[:20]:
-            if send_message(format_listing(m)):
-                successfully_sent.append(m["listing_id"])
+            if send_message(chat_id, format_listing(m)):
+                newly_sent.append((m["listing_id"], str(chat_id)))
             time.sleep(0.5)
 
-        # Record sent listings in idempotency log
-        record_sent_ids(successfully_sent)
-        print(f"Sent {len(successfully_sent)}/{len(matching)} notifications")
-    else:
-        print("No new matching listings to send")
+        # Record after each recipient so a mid-run failure can't re-notify them.
+        record_sent_pairs(newly_sent)
+        total_sent += len(newly_sent)
+
+    print(f"Sent {total_sent} notifications total")

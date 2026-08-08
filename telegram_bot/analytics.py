@@ -9,19 +9,35 @@ Tracks aggregated, non-personal statistics:
 Users can opt out of detailed tracking via /privacy. When opted out,
 only a "+1 user" count is recorded — no commands or filter preferences.
 
-No personally identifiable information is stored. Chat IDs are hashed
-with SHA-256 before storage so individual users cannot be identified.
+No personally identifiable information is stored. Chat IDs are pseudonymized
+with a salted HMAC-SHA256 before storage so individual users cannot be
+identified (set ANALYTICS_SALT to a random secret).
 
 Storage: local SQLite database (telegram_bot/analytics.db).
 """
 
 import hashlib
+import hmac
+import logging
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 DB_PATH = Path(__file__).parent / "analytics.db"
+
+# Secret salt for hashing chat ids. chat_ids live in a small, enumerable integer
+# space, so an unsalted hash could be brute-forced to confirm a specific user.
+# A secret HMAC key defeats that. Set ANALYTICS_SALT in the environment.
+_ANALYTICS_SALT = os.environ.get("ANALYTICS_SALT", "")
+if not _ANALYTICS_SALT:
+    logger.warning(
+        "ANALYTICS_SALT is not set — user hashes are guessable from a known chat_id. "
+        "Set ANALYTICS_SALT to a random secret for real anonymization."
+    )
 
 _local = threading.local()
 
@@ -68,8 +84,14 @@ def _init_db(conn: sqlite3.Connection):
 
 
 def _hash_user(chat_id: int) -> str:
-    """Hash chat_id with SHA-256. One-way, cannot be reversed."""
-    return hashlib.sha256(str(chat_id).encode()).hexdigest()[:16]
+    """Pseudonymize chat_id with a salted HMAC-SHA256 (one-way, not reversible).
+
+    With a secret ANALYTICS_SALT set, the digest cannot be brute-forced back to a
+    chat_id by enumerating the (small) chat_id space.
+    """
+    return hmac.new(_ANALYTICS_SALT.encode(), str(chat_id).encode(), hashlib.sha256).hexdigest()[
+        :16
+    ]
 
 
 def _ensure_user(conn: sqlite3.Connection, user_hash: str) -> bool:
