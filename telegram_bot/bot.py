@@ -351,12 +351,16 @@ async def _handle_toggle(query, config: dict, data: str):
 
     if value in current:
         current.remove(value)
+        was_added = False
     else:
         current.append(value)
+        was_added = True
     config[key] = current
     save_config(config)
 
-    log_filter_choice(query.message.chat.id, dim_map[prefix], current)
+    # Only log when a filter is enabled (tracks what users want, not what they remove)
+    if was_added:
+        log_filter_choice(query.message.chat.id, dim_map[prefix], [value])
 
     # Refresh picker in place
     await _show_toggle_picker(
@@ -758,7 +762,8 @@ async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     config["cities"] = current + added
     save_config(config)
-    log_filter_choice(update.effective_chat.id, "city", config["cities"])
+    if added:
+        log_filter_choice(update.effective_chat.id, "city", added)
 
     parts = []
     if added:
