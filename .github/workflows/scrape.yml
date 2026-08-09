@@ -59,10 +59,47 @@ jobs:
           DB_HOST="https://${DB_HOST%/}"
           echo "Using Databricks host: ${DB_HOST}"
 
-          RUN_ID=$(curl -sS --fail-with-body -X POST "${DB_HOST}/api/2.1/jobs/run-now" \
-            -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"job_id\": ${DATABRICKS_JOB_ID}}" | python -c 'import sys,json; print(json.load(sys.stdin)["run_id"])')
+          # Trigger with retries — Free Edition sometimes returns FEATURE_DISABLED
+          # (HTTP 404) when the org is temporarily throttled. Retry up to 10 min.
+          TRIGGER_DEADLINE=$(( $(date +%s) + 600 ))
+          TRIGGER_ATTEMPT=0
+          RUN_ID=""
+          while true; do
+            TRIGGER_ATTEMPT=$((TRIGGER_ATTEMPT + 1))
+            HTTP_CODE=$(curl -sS -o /tmp/trigger_resp.json -w "%{http_code}" \
+              -X POST "${DB_HOST}/api/2.1/jobs/run-now" \
+              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"job_id\": ${DATABRICKS_JOB_ID}}")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              RUN_ID=$(python -c 'import sys,json; print(json.load(open("/tmp/trigger_resp.json"))["run_id"])')
+              break
+            fi
+
+            RESP_BODY=$(cat /tmp/trigger_resp.json 2>/dev/null || echo "")
+            echo "Trigger attempt ${TRIGGER_ATTEMPT} failed (HTTP ${HTTP_CODE}): ${RESP_BODY}"
+
+            # Retry on transient/throttle errors (429, 5xx, FEATURE_DISABLED 404)
+            if echo "$RESP_BODY" | grep -qi "FEATURE_DISABLED\|temporarily"; then
+              echo "Databricks org temporarily throttled — will retry..."
+            elif [ "$HTTP_CODE" -ge 500 ] || [ "$HTTP_CODE" = "429" ]; then
+              echo "Server error / rate limit — will retry..."
+            else
+              echo "Non-retryable error (HTTP ${HTTP_CODE}). Aborting." >&2
+              exit 1
+            fi
+
+            if [ "$(date +%s)" -ge "$TRIGGER_DEADLINE" ]; then
+              echo "Timed out trying to trigger Databricks job (${TRIGGER_ATTEMPT} attempts over 10 min)" >&2
+              exit 1
+            fi
+            BACKOFF=$(( 30 * TRIGGER_ATTEMPT ))
+            [ "$BACKOFF" -gt 120 ] && BACKOFF=120
+            echo "Waiting ${BACKOFF}s before retry..."
+            sleep "$BACKOFF"
+          done
+
           echo "Triggered Databricks run_id=${RUN_ID}"
 
           # Poll run status until terminal (max ~20 min).
