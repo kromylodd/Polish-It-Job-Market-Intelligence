@@ -1822,21 +1822,32 @@ async def post_init(application: Application):
 
     logger.info("Bot command menu registered")
 
-    # Keep the premium serving cache warm: sync the gold marts on startup (if
-    # stale) and then periodically in the background. This runs off the event
-    # loop so it never blocks message handling, and premium queries always hit
-    # the fast local DuckDB cache instead of a cold Databricks warehouse.
-    application.create_task(_serving_sync_loop())
+    # Keep the premium serving cache warm using the JobQueue: an initial sync on
+    # startup (only if the cache is stale) and a periodic refresh thereafter.
+    # sync_marts runs in a worker thread so it never blocks the event loop, and
+    # premium queries always hit the fast local DuckDB cache instead of a cold
+    # Databricks warehouse.
+    jq = application.job_queue
+    if jq is not None:
+        jq.run_once(_startup_sync_job, when=1)
+        jq.run_repeating(
+            _periodic_sync_job,
+            interval=SERVING_SYNC_INTERVAL_SECONDS,
+            first=SERVING_SYNC_INTERVAL_SECONDS,
+        )
+    else:
+        logger.warning(
+            "JobQueue unavailable — serving cache won't auto-refresh. "
+            "Install python-telegram-bot[job-queue], or use the admin /refresh command."
+        )
 
 
 # How often to refresh the serving cache in the background.
 SERVING_SYNC_INTERVAL_SECONDS = int(os.environ.get("SERVING_SYNC_INTERVAL_SECONDS", str(6 * 3600)))
 
 
-async def _serving_sync_loop():
-    """Background task: refresh the serving cache on startup and on an interval."""
-    # Initial sync only if the cache is missing/stale, to avoid a redundant pull
-    # right after a deploy that already has a fresh cache.
+async def _startup_sync_job(context: ContextTypes.DEFAULT_TYPE):
+    """Sync the serving cache on startup, but only if it's missing/stale."""
     try:
         if serving.is_stale():
             logger.info("Serving cache stale/missing — syncing marts on startup…")
@@ -1845,13 +1856,14 @@ async def _serving_sync_loop():
     except Exception as e:
         logger.warning("Startup mart sync failed: %s", e)
 
-    while True:
-        await asyncio.sleep(SERVING_SYNC_INTERVAL_SECONDS)
-        try:
-            synced = await asyncio.to_thread(serving.sync_marts)
-            logger.info("Periodic mart sync: %s", synced or "nothing synced")
-        except Exception as e:
-            logger.warning("Periodic mart sync failed: %s", e)
+
+async def _periodic_sync_job(context: ContextTypes.DEFAULT_TYPE):
+    """Refresh the serving cache on the background interval."""
+    try:
+        synced = await asyncio.to_thread(serving.sync_marts)
+        logger.info("Periodic mart sync: %s", synced or "nothing synced")
+    except Exception as e:
+        logger.warning("Periodic mart sync failed: %s", e)
 
 
 def main():

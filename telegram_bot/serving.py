@@ -95,10 +95,19 @@ def _databricks_connect():
     except ImportError:
         logger.warning("databricks-sql-connector not installed; cannot sync marts")
         return None
+    # Bound the retry policy. The connector defaults to retrying for 900s (15 min)
+    # against a cold/unreachable warehouse; because sync_marts runs in a non-daemon
+    # worker thread, that would also delay clean process shutdown by up to 15 min.
+    # Fail fast instead — a missed sync just means the cache stays as-is until the
+    # next interval (or /refresh). Override via SYNC_RETRY_MAX_SECONDS.
+    retry_seconds = int(os.environ.get("SYNC_RETRY_MAX_SECONDS", "90"))
     return sql.connect(
         server_hostname=host,
         http_path=f"/sql/1.0/warehouses/{warehouse_id}",
         access_token=token,
+        _retry_stop_after_attempts_count=5,
+        _retry_stop_after_attempts_duration=float(retry_seconds),
+        _socket_timeout=float(retry_seconds),
     )
 
 
@@ -118,7 +127,14 @@ def sync_marts(marts: dict[str, str] | None = None) -> dict[str, int]:
     db = _duckdb_connect(read_only=False)
     if db is None:
         return {}
-    dbx = _databricks_connect()
+    try:
+        dbx = _databricks_connect()
+    except Exception as e:
+        # A cold/unreachable warehouse raises on OpenSession. Treat as "no sync"
+        # rather than propagating — the cache just stays as-is until next time.
+        logger.warning("Databricks connection failed; skipping sync: %s", e)
+        db.close()
+        return {}
     if dbx is None:
         db.close()
         return {}
