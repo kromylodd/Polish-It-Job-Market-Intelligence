@@ -52,7 +52,14 @@ jobs:
             exit 1
           fi
 
-          RUN_ID=$(curl -sS --fail-with-body -X POST "${DATABRICKS_HOST}/api/2.1/jobs/run-now" \
+          # Normalize host: ensure https:// scheme (the secret may store bare hostname)
+          DB_HOST="${DATABRICKS_HOST}"
+          DB_HOST="${DB_HOST#https://}"
+          DB_HOST="${DB_HOST#http://}"
+          DB_HOST="https://${DB_HOST%/}"
+          echo "Using Databricks host: ${DB_HOST}"
+
+          RUN_ID=$(curl -sS --fail-with-body -X POST "${DB_HOST}/api/2.1/jobs/run-now" \
             -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "{\"job_id\": ${DATABRICKS_JOB_ID}}" | python -c 'import sys,json; print(json.load(sys.stdin)["run_id"])')
@@ -63,7 +70,7 @@ jobs:
           while true; do
             RESP=$(curl -sS --fail-with-body \
               -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
-              "${DATABRICKS_HOST}/api/2.1/jobs/runs/get?run_id=${RUN_ID}")
+              "${DB_HOST}/api/2.1/jobs/runs/get?run_id=${RUN_ID}")
             LIFECYCLE=$(echo "$RESP" | python -c 'import sys,json; print(json.load(sys.stdin)["state"]["life_cycle_state"])')
             RESULT=$(echo "$RESP" | python -c 'import sys,json; print(json.load(sys.stdin)["state"].get("result_state",""))')
             echo "run ${RUN_ID}: ${LIFECYCLE} ${RESULT}"
