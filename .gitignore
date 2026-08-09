@@ -53,6 +53,12 @@ HANDOFF.md
 telegram_bot/user_config.json
 telegram_bot/analytics.db
 
+# Bot premium runtime state (local caches / SQLite stores — disposable/private)
+telegram_bot/serving.duckdb
+telegram_bot/serving.duckdb.wal
+telegram_bot/tracker.db
+telegram_bot/payments.db
+
 # Data files (don't commit raw scraped data)
 data/
 *.json

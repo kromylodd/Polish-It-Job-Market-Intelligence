@@ -23,21 +23,36 @@ Run with: python -m telegram_bot.bot
 
 import asyncio
 import copy
+import csv
+import datetime
+import html
+import io
 import json
 import logging
 import os
 import threading
 from pathlib import Path
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    PreCheckoutQueryHandler,
+)
+from telegram.ext import (
+    filters as tg_filters,
 )
 
-from telegram_bot import config_store
+from telegram_bot import config_store, payments, reports, serving, tracker
 from telegram_bot.analytics import (
     get_analytics_summary,
     is_opted_out,
@@ -85,6 +100,16 @@ BOT_COMMANDS = [
     BotCommand("filters", "View & edit your filters"),
     BotCommand("latest", "Get recent matching listings"),
     BotCommand("tolerance", "Set mismatch tolerance"),
+    BotCommand("myskills", "Set your skills (ranks matches)"),
+    BotCommand("salary", "Salary filter / insights (/salary python)"),
+    BotCommand("trend", "Market & tech demand trends 💎"),
+    BotCommand("skills", "Co-occurring technologies 💎"),
+    BotCommand("company", "Company hiring intel 💎"),
+    BotCommand("report", "Weekly market report 💎"),
+    BotCommand("export", "Export your listings to CSV 💎"),
+    BotCommand("mytracker", "Your tracked applications 💎"),
+    BotCommand("subscribe", "Premium tiers & pricing"),
+    BotCommand("feedback", "Send feedback to the maker"),
     BotCommand("privacy", "Privacy & data info"),
     BotCommand("help", "Show all commands"),
 ]
@@ -177,10 +202,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "<b>Commands:</b>\n\n"
         "<b>Main:</b>\n"
-        "🔍 /latest — get recent matching listings\n"
+        "🔍 /latest — get recent matching listings 💎\n"
         "📋 /filters — view &amp; edit all filters\n"
         "⚙️ /tolerance — set mismatch tolerance\n"
-        "🔒 /privacy — data collection settings\n\n"
+        "🧠 /myskills — save your skills (ranks /latest)\n"
+        "🔒 /privacy — data collection settings\n"
+        "💬 /feedback — send a suggestion or bug report\n\n"
         "<b>Filter commands</b> (edit via /filters or directly):\n"
         "  /seniority — junior, mid, senior, lead\n"
         "  /tech — technologies (or /tech list)\n"
@@ -189,8 +216,18 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /employment — b2b / uop / zlecenie\n"
         "  /salary — minimum salary\n"
         "  /city — location filter\n\n"
+        "<b>💎 Premium</b> (see /subscribe):\n"
+        "  /salary &lt;tech&gt; — salary min/median/max\n"
+        "  /trend [tech] — market &amp; demand trends\n"
+        "  /skills &lt;tech&gt; — co-occurring technologies\n"
+        "  /company &lt;name&gt; — company hiring intel\n"
+        "  /report — weekly market report\n"
+        "  /export — download your listings (CSV)\n"
+        "  /applied /interested /rejected — track jobs\n"
+        "  /mytracker — your tracked applications\n\n"
         "<i>Empty filters = no restriction on that dimension.\n"
-        "Only active filters count toward tolerance.</i>"
+        "Only active filters count toward tolerance.\n"
+        "Filters &amp; daily alerts are free; 💎 marks premium.</i>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -657,9 +694,11 @@ async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = f"{sal} PLN" if sal else "any"
         await update.message.reply_text(
             f"💰 <b>Current minimum:</b> {current}\n\n"
-            f"<b>Usage:</b> /salary 8000\n"
+            f"<b>Set filter:</b> /salary 8000\n"
             f"<i>(monthly PLN — listings paying less won't match)</i>\n"
-            f"<b>Clear:</b> /salary clear",
+            f"<b>Clear:</b> /salary clear\n\n"
+            f"<b>💎 Salary insights:</b> /salary python\n"
+            f"<i>(min/median/max for a technology — premium)</i>",
             parse_mode="HTML",
         )
         return
@@ -667,13 +706,55 @@ async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = int(args[0].replace(",", "").replace(".", ""))
     except ValueError:
-        await update.message.reply_text("❌ Enter a number, e.g. /salary 8000")
+        # Non-numeric arg → premium salary analytics for that technology.
+        await _salary_insights(update, args)
         return
 
     config = load_config(update.effective_chat.id)
     config["salary_min"] = amount
     save_config(update.effective_chat.id, config)
     await update.message.reply_text(f"✅ Min salary → {amount} PLN/month")
+
+
+async def _salary_insights(update: Update, args: list[str]):
+    """Premium: salary stats for a technology (optionally a seniority as 2nd arg)."""
+    if not await _require_feature(update, payments.FEATURE_SALARY, "Salary insights"):
+        return
+    log_command(update.effective_chat.id, "salary_insights")
+
+    tech = args[0]
+    seniority = args[1].lower() if len(args) > 1 else None
+    stats = await asyncio.to_thread(serving.salary_for_tech, tech, seniority)
+    if not stats:
+        await update.message.reply_text(
+            f"📭 No salary data for <b>{tech}</b>"
+            + (f" ({seniority})" if seniority else "")
+            + ".\nTry another technology, e.g. /salary Python",
+            parse_mode="HTML",
+        )
+        return
+
+    cur = stats.get("currency", "PLN")
+    lines = [f"💰 <b>Salary — {tech}</b>" + (f" · {seniority}" if seniority else "")]
+    lines.append(f"<i>Based on {stats['listing_count']} listings</i>\n")
+    if stats.get("median") is not None:
+        lines.append(f"📊 Median: <b>{stats['median']} {cur}</b>")
+    if stats.get("avg_mid") is not None:
+        lines.append(f"⌀ Average: {stats['avg_mid']} {cur}")
+    if stats.get("min") is not None and stats.get("max") is not None:
+        lines.append(f"📉 Range: {stats['min']} – {stats['max']} {cur}")
+
+    # Per-seniority breakdown (only when not already filtered to one).
+    if not seniority:
+        by_sen = await asyncio.to_thread(serving.salary_by_seniority, tech)
+        rows = [r for r in by_sen if r.get("avg_mid")]
+        if len(rows) > 1:
+            lines.append("\n<b>By seniority (avg):</b>")
+            for r in rows:
+                label = ALL_SENIORITIES.get((r.get("seniority") or "").lower(), r.get("seniority"))
+                lines.append(f"  {label}: {round(r['avg_mid'])} {cur} ({int(r['n'])})")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -813,24 +894,35 @@ async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def is_paid_user(chat_id: int) -> bool:
-    """Check if a user has paid/premium access.
+    """Whether a user has any active paid subscription (admin always counts)."""
+    return chat_id == ADMIN_CHAT_ID or payments.is_subscribed(chat_id)
 
-    TODO: Implement real payment verification (e.g. Stripe webhook, DB lookup).
-    For now this is a stub — only the admin has access as a placeholder.
-    """
-    return chat_id == ADMIN_CHAT_ID
+
+def has_feature(chat_id: int, feature: str) -> bool:
+    """Whether a user can use a premium feature (admin bypasses the paywall)."""
+    return chat_id == ADMIN_CHAT_ID or payments.has_feature(chat_id, feature)
+
+
+def _upsell_text(feature_label: str) -> str:
+    """Friendly paywall message pointing users to /subscribe."""
+    return (
+        f"🔒 <b>{feature_label}</b> is a premium feature.\n\n"
+        "Unlock it with a subscription — see /subscribe for tiers and prices.\n"
+        "<i>Filters and daily alerts stay free for everyone.</i>"
+    )
+
+
+async def _require_feature(update: Update, feature: str, feature_label: str) -> bool:
+    """Gate a handler behind a feature. Sends an upsell + returns False if blocked."""
+    if has_feature(update.effective_chat.id, feature):
+        return True
+    await update.message.reply_text(_upsell_text(feature_label), parse_mode="HTML")
+    return False
 
 
 async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Paid-user only: on-demand queries hit the Databricks warehouse directly.
-    if not is_paid_user(update.effective_chat.id):
-        await update.message.reply_text(
-            "🔒 <b>/latest is a premium feature</b>\n\n"
-            "On-demand listing queries will be available for paid users.\n"
-            "Stay tuned — this is coming soon!\n\n"
-            "In the meantime, you still receive daily alerts matching your filters.",
-            parse_mode="HTML",
-        )
+    # Premium: on-demand queries hit the data source directly.
+    if not await _require_feature(update, payments.FEATURE_LATEST, "/latest on-demand listings"):
         return
     log_command(update.effective_chat.id, "latest")
     await update.message.reply_text("🔍 Fetching latest listings...")
@@ -858,22 +950,36 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Personalization: if the user saved a skill set (/myskills), rank by overlap.
+    skills = config.get("skills", [])
+    if skills:
+        listings = serving.rank_listings_by_skills(listings, skills)
+
     count = len(listings)
+    chat_id = update.effective_chat.id
 
-    from telegram_bot.notify import _build_combined_message
+    # Pro users with the tracker feature get per-listing messages with
+    # Applied/Interested/Rejected buttons; everyone else gets the compact,
+    # combined (anti-spam) format.
+    if has_feature(chat_id, payments.FEATURE_TRACKER):
+        for listing in listings[:10]:
+            await _send_trackable_listing(update.message, listing)
+            await asyncio.sleep(0.2)
+    else:
+        from telegram_bot.notify import _build_combined_message
 
-    chunks = _build_combined_message(listings[:10])
-    for chunk in chunks:
-        try:
-            await update.message.reply_text(
-                chunk,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send listing chunk: {e}")
-            continue
-        await asyncio.sleep(0.3)
+        chunks = _build_combined_message(listings[:10])
+        for chunk in chunks:
+            try:
+                await update.message.reply_text(
+                    chunk,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send listing chunk: {e}")
+                continue
+            await asyncio.sleep(0.3)
 
     if count > 10:
         await update.message.reply_text(
@@ -1187,6 +1293,518 @@ def _get_stats() -> dict:
     return stats
 
 
+# --- Premium commands ---
+
+# Small in-memory cache of recently shown listings so tracker inline buttons can
+# recover a listing's title/company/url from just its id (kept out of callback
+# data, which is limited to 64 bytes). Lost on restart — harmless, since the
+# tracker row already persists the metadata captured at button-press time.
+_recent_listings: dict[str, dict] = {}
+_RECENT_MAX = 2000
+
+
+def _esc(value: object) -> str:
+    return html.escape(str(value))
+
+
+def _remember_listing(listing: dict) -> str:
+    """Cache a listing's display metadata keyed by its id. Returns the id."""
+    lid = str(listing.get("listing_id", "") or "")
+    if not lid:
+        return lid
+    slug = listing.get("slug", "")
+    url = f"https://justjoin.it/offers/{slug}" if slug else ""
+    _recent_listings[lid] = {
+        "title": listing.get("title"),
+        "company": listing.get("company_name"),
+        "url": url,
+    }
+    if len(_recent_listings) > _RECENT_MAX:
+        for k in list(_recent_listings)[: _RECENT_MAX // 2]:
+            _recent_listings.pop(k, None)
+    return lid
+
+
+async def _send_trackable_listing(message, listing: dict):
+    """Send one listing with Applied/Interested/Rejected inline buttons."""
+    from telegram_bot.notify import format_listing
+
+    lid = _remember_listing(listing)
+    text = format_listing(listing)
+    pct = listing.get("match_pct")
+    if pct is not None:
+        text = f"🎯 <b>{pct}% skill match</b>\n{text}"
+
+    markup = None
+    if lid:
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Applied", callback_data=f"trk:applied:{lid}"),
+                    InlineKeyboardButton("👀 Interested", callback_data=f"trk:interested:{lid}"),
+                    InlineKeyboardButton("❌ Rejected", callback_data=f"trk:rejected:{lid}"),
+                ]
+            ]
+        )
+    await message.reply_text(
+        text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup
+    )
+
+
+async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Premium: technologies that co-occur with a given tech, with percentages."""
+    if not await _require_feature(update, payments.FEATURE_SKILLS, "/skills co-occurrence"):
+        return
+    log_command(update.effective_chat.id, "skills")
+    if not context.args:
+        await update.message.reply_text(
+            "🧩 <b>Skill co-occurrence</b>\n\n"
+            "Usage: <code>/skills Python</code>\n"
+            "<i>Shows which technologies are most often requested alongside it.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    tech = context.args[0]
+    data = await asyncio.to_thread(serving.skills_for_tech, tech)
+    if not data or not data.get("related"):
+        await update.message.reply_text(
+            f"📭 No co-occurrence data for <b>{_esc(tech)}</b> yet.", parse_mode="HTML"
+        )
+        return
+
+    lines = [f"🧩 <b>Often requested with {_esc(tech)}</b>"]
+    if data.get("total"):
+        lines.append(f"<i>Across {data['total']} listings mentioning {_esc(tech)}</i>")
+    lines.append("")
+    for r in data["related"]:
+        pct = f" — {r['pct']}%" if r.get("pct") is not None else ""
+        lines.append(f"• {_esc(r['tech'])}: {r['count']} listings{pct}")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Premium: overall market trend, or weekly demand for a specific technology."""
+    if not await _require_feature(update, payments.FEATURE_TREND, "Market trends"):
+        return
+    log_command(update.effective_chat.id, "trend")
+
+    if context.args:
+        tech = context.args[0]
+        data = await asyncio.to_thread(serving.tech_demand_trend, tech, 12)
+        if not data:
+            await update.message.reply_text(
+                f"📭 No demand trend for <b>{_esc(tech)}</b> yet.", parse_mode="HTML"
+            )
+            return
+        latest = data[-1]
+        wow = latest.get("wow_change") or 0
+        arrow = "🔺" if wow > 0 else ("🔻" if wow < 0 else "▶️")
+        caption = (
+            f"📈 <b>{_esc(tech)} — weekly demand</b>\n"
+            f"Latest week: {latest.get('listing_count')} listings "
+            f"({arrow} {'+' if wow >= 0 else ''}{wow} WoW)"
+        )
+        png = await asyncio.to_thread(reports.build_tech_demand_chart, tech)
+        if png:
+            await update.message.reply_photo(png, caption=caption, parse_mode="HTML")
+        else:
+            await update.message.reply_text(caption, parse_mode="HTML")
+        return
+
+    # No tech → overall market trend.
+    trend = await asyncio.to_thread(serving.market_trend, 8)
+    if not trend:
+        await update.message.reply_text(
+            "📭 Market trend data isn't ready yet — try again after the next pipeline run."
+        )
+        return
+    latest, first = trend[-1], trend[0]
+    vol_now = latest.get("rolling_7d_listings")
+    vol_then = first.get("rolling_7d_listings")
+    sal_now = latest.get("rolling_7d_avg_salary")
+    lines = ["📈 <b>Market trend (last 8 weeks)</b>\n"]
+    if vol_now is not None and vol_then:
+        delta = vol_now - vol_then
+        arrow = "🔺" if delta > 0 else ("🔻" if delta < 0 else "▶️")
+        lines.append(f"{arrow} 7-day volume: {vol_then} → {vol_now}")
+    if sal_now:
+        lines.append(f"💰 Avg salary (rolling): ~{round(sal_now)} PLN")
+    png = await asyncio.to_thread(reports.build_trend_chart)
+    if png:
+        await update.message.reply_photo(png, caption="\n".join(lines), parse_mode="HTML")
+    else:
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Premium: how many current listings a company has + salary range + samples."""
+    if not await _require_feature(update, payments.FEATURE_COMPANY, "Company intel"):
+        return
+    log_command(update.effective_chat.id, "company")
+    if not context.args:
+        await update.message.reply_text(
+            "🏢 <b>Company intel</b>\n\nUsage: <code>/company Allegro</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    name = " ".join(context.args)
+    data = await asyncio.to_thread(serving.company_intel, name)
+    if not data:
+        await update.message.reply_text(
+            f"📭 No current listings found for <b>{_esc(name)}</b>.", parse_mode="HTML"
+        )
+        return
+
+    cur = data.get("currency", "PLN")
+    lines = [f"🏢 <b>{_esc(name)}</b>", f"<i>{data['listing_count']} current listings</i>", ""]
+    if data.get("avg_min") and data.get("avg_max"):
+        lines.append(f"💰 Avg range: {data['avg_min']}–{data['avg_max']} {cur}")
+    if data.get("sample_titles"):
+        lines.append("\n<b>Sample roles:</b>")
+        for t in data["sample_titles"]:
+            lines.append(f"• {_esc(t)}")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Free personalization: save your skill set; /latest is ranked by % match."""
+    log_command(update.effective_chat.id, "myskills")
+    chat_id = update.effective_chat.id
+    config = load_config(chat_id)
+    args = context.args
+
+    if not args:
+        skills = config.get("skills", [])
+        current = ", ".join(skills) if skills else "none set"
+        await update.message.reply_text(
+            f"🧠 <b>Your skills:</b> {_esc(current)}\n\n"
+            "Set: <code>/myskills python sql airflow</code>\n"
+            "Clear: <code>/myskills clear</code>\n\n"
+            "<i>Your /latest results get ranked by % overlap with these skills.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    if args[0].lower() == "clear":
+        config["skills"] = []
+        save_config(chat_id, config)
+        await update.message.reply_text("✅ Skills cleared")
+        return
+
+    skills = [s.strip() for s in " ".join(args).replace(",", " ").split() if s.strip()]
+    config["skills"] = skills
+    save_config(chat_id, config)
+    await update.message.reply_text(
+        f"✅ Skills saved: {_esc(', '.join(skills))}\n"
+        "Your /latest results are now ranked by match.",
+        parse_mode="HTML",
+    )
+
+
+def _listings_to_csv(listings: list[dict]) -> bytes:
+    """Serialize listings to CSV bytes for /export."""
+    fields = [
+        "listing_id",
+        "title",
+        "company_name",
+        "seniority",
+        "employment_type",
+        "workplace_type",
+        "category",
+        "salary_min",
+        "salary_max",
+        "currency",
+        "cities",
+        "technologies",
+        "slug",
+    ]
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for listing in listings:
+        row = dict(listing)
+        for key in ("cities", "technologies"):
+            val = row.get(key)
+            if isinstance(val, list):
+                row[key] = ", ".join(str(v) for v in val)
+        writer.writerow(row)
+    return buf.getvalue().encode("utf-8")
+
+
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Premium: export the user's filtered listings as a CSV file."""
+    if not await _require_feature(update, payments.FEATURE_EXPORT, "/export"):
+        return
+    log_command(update.effective_chat.id, "export")
+    await update.message.reply_text("📦 Preparing your export…")
+
+    config = load_config(update.effective_chat.id)
+    try:
+        listings = await asyncio.to_thread(_get_latest_listings, config)
+    except Exception as e:
+        logger.error("/export failed: %s", e)
+        await update.message.reply_text("⚠️ Could not build the export right now.")
+        return
+
+    if not listings:
+        await update.message.reply_text("📭 No listings match your filters to export.")
+        return
+
+    csv_bytes = _listings_to_csv(listings)
+    bio = io.BytesIO(csv_bytes)
+    stamp = datetime.datetime.now().strftime("%Y%m%d")
+    await update.message.reply_document(
+        document=bio,
+        filename=f"listings_{stamp}.csv",
+        caption=f"📄 {len(listings)} listings matching your filters",
+    )
+
+
+async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Premium: weekly market report (top companies, hot tech, salary trend)."""
+    if not await _require_feature(update, payments.FEATURE_REPORT, "Weekly market report"):
+        return
+    log_command(update.effective_chat.id, "report")
+    await update.message.reply_text("📊 Building your market report…")
+
+    text = await asyncio.to_thread(reports.build_market_report)
+    png = await asyncio.to_thread(reports.build_trend_chart)
+    if png:
+        try:
+            await update.message.reply_photo(png, caption="Polish IT market — 8-week trend")
+        except Exception as e:
+            logger.warning("report chart send failed: %s", e)
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
+
+
+# --- Application tracker commands ---
+
+
+def _extract_listing_id(token: str) -> str:
+    """Derive a stable tracker key from a raw id or a justjoin.it URL."""
+    token = token.strip()
+    if token.startswith("http"):
+        return token.rstrip("/").rsplit("/", 1)[-1] or token
+    return token
+
+
+async def _track_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, status: str):
+    if not await _require_feature(update, payments.FEATURE_TRACKER, "Application tracker"):
+        return
+    log_command(update.effective_chat.id, status)
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            f"Usage: <code>/{status} &lt;listing-id or justjoin URL&gt;</code>\n\n"
+            "💡 Easiest: tap the buttons under listings in /latest to track in one tap.",
+            parse_mode="HTML",
+        )
+        return
+
+    token = args[0]
+    lid = _extract_listing_id(token)
+    meta = _recent_listings.get(lid, {})
+    url = meta.get("url") or (token if token.startswith("http") else None)
+    ok = await asyncio.to_thread(
+        tracker.set_status,
+        update.effective_chat.id,
+        lid,
+        status,
+        title=meta.get("title"),
+        company=meta.get("company"),
+        url=url,
+    )
+    if ok:
+        await update.message.reply_text(
+            f"✅ Marked as <b>{status}</b>. See /mytracker", parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text("⚠️ Could not save that — try again.")
+
+
+async def cmd_applied(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _track_status_cmd(update, context, "applied")
+
+
+async def cmd_interested(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _track_status_cmd(update, context, "interested")
+
+
+async def cmd_rejected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _track_status_cmd(update, context, "rejected")
+
+
+async def cmd_mytracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Premium: show the user's tracked applications."""
+    if not await _require_feature(update, payments.FEATURE_TRACKER, "Application tracker"):
+        return
+    log_command(update.effective_chat.id, "mytracker")
+    chat_id = update.effective_chat.id
+    c = await asyncio.to_thread(tracker.counts, chat_id)
+    apps = await asyncio.to_thread(tracker.list_applications, chat_id)
+    if not apps:
+        await update.message.reply_text(
+            "📋 Your tracker is empty.\n"
+            "Tap the buttons under /latest listings, or use /applied &lt;id&gt;.",
+            parse_mode="HTML",
+        )
+        return
+
+    icon = {"applied": "✅", "interested": "👀", "rejected": "❌"}
+    header = (
+        f"📋 <b>Your tracker</b> — "
+        f"✅ {c.get('applied', 0)} · 👀 {c.get('interested', 0)} · ❌ {c.get('rejected', 0)}\n"
+    )
+    lines = [header]
+    for a in apps[:40]:
+        title = a.get("title") or a.get("listing_id")
+        company = f" @ {_esc(a['company'])}" if a.get("company") else ""
+        link = f"\n   {a['url']}" if a.get("url") else ""
+        lines.append(f"{icon.get(a['status'], '•')} {_esc(title)}{company}{link}")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
+    )
+
+
+# --- Subscriptions (Telegram Stars) ---
+
+
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show tiers and let the user buy one with Telegram Stars."""
+    log_command(update.effective_chat.id, "subscribe")
+    sub = payments.get_subscription(update.effective_chat.id)
+
+    lines = ["💎 <b>Premium tiers</b>\n"]
+    if sub:
+        exp = datetime.datetime.fromtimestamp(sub["expires_at"]).strftime("%Y-%m-%d")
+        lines.append(f"✅ Active: <b>{payments.TIERS[sub['tier']]['name']}</b> until {exp}\n")
+    lines.append("<b>Free</b> — daily digest + all filters (no cost)\n")
+    for t in payments.TIERS.values():
+        lines.append(f"<b>{t['name']} — {t['stars']} ⭐ / 30 days</b>\n{t['blurb']}\n")
+    lines.append("<i>Payments use Telegram Stars. Tap a button below to subscribe.</i>")
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(f"{t['name']} — {t['stars']} ⭐", callback_data=f"subtier:{key}")]
+            for key, t in payments.TIERS.items()
+        ]
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
+
+
+async def _send_invoice(context: ContextTypes.DEFAULT_TYPE, chat_id: int, tier: str):
+    """Send a Telegram Stars invoice for a subscription tier."""
+    t = payments.TIERS[tier]
+    await context.bot.send_invoice(
+        chat_id=chat_id,
+        title=f"{t['name']} subscription — 30 days",
+        description=t["blurb"],
+        payload=payments.make_payload(tier, chat_id),
+        provider_token="",  # empty string ⇒ pay with Telegram Stars
+        currency="XTR",
+        prices=[LabeledPrice(f"{t['name']} (30 days)", t["stars"])],
+    )
+
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Approve the pre-checkout if the payload maps to a known tier."""
+    query = update.pre_checkout_query
+    if payments.tier_for_payload(query.invoice_payload):
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="This subscription is no longer available.")
+
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Activate the subscription after a successful Stars payment."""
+    sp = update.message.successful_payment
+    tier = payments.tier_for_payload(sp.invoice_payload)
+    if not tier:
+        return
+    chat_id = update.effective_chat.id
+    payments.record_payment(sp.telegram_payment_charge_id, chat_id, tier, sp.total_amount)
+    expires = payments.activate(chat_id, tier)
+    exp = datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d")
+    await update.message.reply_text(
+        f"🎉 <b>{payments.TIERS[tier]['name']}</b> is active until {exp}!\n\n"
+        "Try /report, /skills Python, /salary Python, or /latest.",
+        parse_mode="HTML",
+    )
+
+
+# --- Admin: refresh the serving cache ---
+
+
+async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: force a resync of the gold marts into the local serving cache."""
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    log_command(update.effective_chat.id, "refresh")
+    await update.message.reply_text("🔄 Syncing marts from Databricks…")
+    synced = await asyncio.to_thread(serving.sync_marts)
+    if synced:
+        body = "\n".join(f"• {t}: {n} rows" for t, n in synced.items())
+        await update.message.reply_text(f"✅ Serving cache refreshed:\n{body}")
+    else:
+        await update.message.reply_text(
+            "⚠️ Sync returned nothing. Check DATABRICKS_* env vars, that duckdb is "
+            "installed, and that Databricks is reachable."
+        )
+
+
+# --- Callback routers for premium inline buttons ---
+
+
+async def _callback_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle tracker inline buttons (trk:<status>:<listing_id>)."""
+    query = update.callback_query
+    parts = query.data.split(":", 2)
+    if len(parts) != 3:
+        await query.answer()
+        return
+    _, status, lid = parts
+    if not has_feature(query.message.chat.id, payments.FEATURE_TRACKER):
+        await query.answer("Premium feature — see /subscribe", show_alert=True)
+        return
+
+    meta = _recent_listings.get(lid, {})
+    await asyncio.to_thread(
+        tracker.set_status,
+        query.message.chat.id,
+        lid,
+        status,
+        title=meta.get("title"),
+        company=meta.get("company"),
+        url=meta.get("url"),
+    )
+    labels = {"applied": "✅ Applied", "interested": "👀 Interested", "rejected": "❌ Rejected"}
+    await query.answer(f"{labels.get(status, status)} — saved")
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+async def _callback_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle tier-selection buttons (subtier:<tier>) by sending an invoice."""
+    query = update.callback_query
+    await query.answer()
+    tier = query.data.split(":", 1)[1] if ":" in query.data else ""
+    if tier not in payments.TIERS:
+        return
+    try:
+        await _send_invoice(context, query.message.chat.id, tier)
+    except Exception as e:
+        logger.error("send_invoice failed: %s", e)
+        await context.bot.send_message(
+            query.message.chat.id,
+            "⚠️ Could not start checkout. Telegram Stars payments may not be enabled "
+            "for this bot yet.",
+        )
+
+
 # --- Bot setup ---
 
 
@@ -1203,6 +1821,37 @@ async def post_init(application: Application):
             logger.info("Seeded local user config from Volume (%d users)", len(remote))
 
     logger.info("Bot command menu registered")
+
+    # Keep the premium serving cache warm: sync the gold marts on startup (if
+    # stale) and then periodically in the background. This runs off the event
+    # loop so it never blocks message handling, and premium queries always hit
+    # the fast local DuckDB cache instead of a cold Databricks warehouse.
+    application.create_task(_serving_sync_loop())
+
+
+# How often to refresh the serving cache in the background.
+SERVING_SYNC_INTERVAL_SECONDS = int(os.environ.get("SERVING_SYNC_INTERVAL_SECONDS", str(6 * 3600)))
+
+
+async def _serving_sync_loop():
+    """Background task: refresh the serving cache on startup and on an interval."""
+    # Initial sync only if the cache is missing/stale, to avoid a redundant pull
+    # right after a deploy that already has a fresh cache.
+    try:
+        if serving.is_stale():
+            logger.info("Serving cache stale/missing — syncing marts on startup…")
+            synced = await asyncio.to_thread(serving.sync_marts)
+            logger.info("Startup mart sync: %s", synced or "nothing synced")
+    except Exception as e:
+        logger.warning("Startup mart sync failed: %s", e)
+
+    while True:
+        await asyncio.sleep(SERVING_SYNC_INTERVAL_SECONDS)
+        try:
+            synced = await asyncio.to_thread(serving.sync_marts)
+            logger.info("Periodic mart sync: %s", synced or "nothing synced")
+        except Exception as e:
+            logger.warning("Periodic mart sync failed: %s", e)
 
 
 def main():
@@ -1232,6 +1881,33 @@ def main():
     app.add_handler(CommandHandler("analytics", cmd_analytics))
     app.add_handler(CommandHandler("privacy", cmd_privacy))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
+
+    # Premium analytics + personalization
+    app.add_handler(CommandHandler("skills", cmd_skills))
+    app.add_handler(CommandHandler("trend", cmd_trend))
+    app.add_handler(CommandHandler("company", cmd_company))
+    app.add_handler(CommandHandler("myskills", cmd_myskills))
+    app.add_handler(CommandHandler("export", cmd_export))
+    app.add_handler(CommandHandler("report", cmd_report))
+
+    # Application tracker
+    app.add_handler(CommandHandler("applied", cmd_applied))
+    app.add_handler(CommandHandler("interested", cmd_interested))
+    app.add_handler(CommandHandler("rejected", cmd_rejected))
+    app.add_handler(CommandHandler("mytracker", cmd_mytracker))
+
+    # Subscriptions (Telegram Stars)
+    app.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    app.add_handler(MessageHandler(tg_filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+
+    # Admin
+    app.add_handler(CommandHandler("refresh", cmd_refresh))
+
+    # Patterned callback routers MUST be registered before the catch-all filters
+    # handler so tracker/subscribe taps aren't swallowed by _callback_filters.
+    app.add_handler(CallbackQueryHandler(_callback_tracker, pattern="^trk:"))
+    app.add_handler(CallbackQueryHandler(_callback_subscribe, pattern="^subtier:"))
     app.add_handler(CallbackQueryHandler(_callback_filters))
 
     logger.info("Bot starting (long-polling)...")
