@@ -106,7 +106,7 @@ BOT_COMMANDS = [
     BotCommand("filters", "View & edit your filters"),
     BotCommand("tolerance", "Set mismatch tolerance"),
     BotCommand("myskills", "Set your skills (ranks matches)"),
-    BotCommand("latest", "Recent matching listings 💎"),
+    BotCommand("latest", "💎 Recent matching listings"),
     BotCommand("premium", "💎 Premium menu (analytics, tracker…)"),
     BotCommand("subscribe", "Premium tiers & pricing"),
     BotCommand("feedback", "Send feedback to the maker"),
@@ -389,6 +389,7 @@ async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<code>/tech Python SQL Docker React</code>\n\n"
             "Browse all: /tech list\nClear: /tech clear",
             parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]),
         )
     elif data == "menu_salary":
         await query.message.edit_text(
@@ -396,6 +397,7 @@ async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Type /salary followed by amount:\n"
             "<code>/salary 10000</code>\n\nClear: /salary clear",
             parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]),
         )
     elif data == "menu_city":
         await query.message.edit_text(
@@ -403,6 +405,7 @@ async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Type /city followed by names:\n"
             "<code>/city Warszawa Kraków Wrocław</code>\n\nClear: /city clear",
             parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]),
         )
     elif data.startswith("toggle_"):
         await _handle_toggle(query, chat_id, config, data)
