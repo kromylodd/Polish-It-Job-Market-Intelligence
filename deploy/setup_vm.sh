@@ -72,10 +72,11 @@ EOF
 echo "==> Enabling linger for ${RUN_USER} (survives logout + reboot)..."
 sudo loginctl enable-linger "${RUN_USER}"
 
-# --- 6. Start the service ----------------------------------------------------
-echo "==> Starting service..."
+# --- 6. (Re)start the service -------------------------------------------------
+echo "==> (Re)starting service..."
 systemctl --user daemon-reload
-systemctl --user enable --now "${SERVICE_NAME}"
+systemctl --user enable "${SERVICE_NAME}"
+systemctl --user restart "${SERVICE_NAME}"
 
 sleep 3
 echo
