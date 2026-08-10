@@ -191,7 +191,8 @@ def _replace_table(db, table: str, columns: list[str], rows: list[tuple]) -> Non
     # Create an empty typed shell by selecting zero rows isn't possible without a
     # source; instead create with all VARCHAR then let DuckDB infer via inserts.
     # Simpler + robust: build from a VALUES-less CREATE then INSERT with params.
-    db.execute(f'CREATE TABLE "{tmp}" ({", ".join(f"""\"{c}\" VARCHAR""" for c in columns)})')
+    col_shell = ", ".join(f'"{c}" VARCHAR' for c in columns)
+    db.execute(f'CREATE TABLE "{tmp}" ({col_shell})')
     if rows:
         db.executemany(
             f'INSERT INTO "{tmp}" ({col_defs}) VALUES ({placeholders})',
