@@ -12,7 +12,6 @@ variables:
       SQL warehouse ID backing the Lakeview dashboard queries. Not hardcoded
       (Free-Edition-specific); supply at deploy time via
       --var="warehouse_id=<id>" or DATABRICKS_BUNDLE_VAR_warehouse_id.
-    default: ""
 
 targets:
   dev:
