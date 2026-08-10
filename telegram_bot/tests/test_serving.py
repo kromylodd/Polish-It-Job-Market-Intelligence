@@ -52,9 +52,11 @@ def serving(tmp_path, monkeypatch):
         "rolling_7d_listings,rolling_7d_avg_salary)"
     )
     con.execute(
-        "CREATE TABLE junior_snapshot AS SELECT * FROM (VALUES "
+        "CREATE TABLE market_snapshot AS SELECT * FROM (VALUES "
         "('l1','Junior Python Dev','Acme','jr-py','junior','b2b','remote','python','7000','9000','PLN','2026-08-01','Python, SQL','Warszawa'),"
-        "('l2','Junior Data Analyst','Acme','jr-da','junior','b2b','hybrid','data','6000','8000','PLN','2026-08-01','SQL, Excel','Kraków')"
+        "('l2','Junior Data Analyst','Acme','jr-da','junior','b2b','hybrid','data','6000','8000','PLN','2026-08-01','SQL, Excel','Kraków'),"
+        # Senior row proves the snapshot is all-seniorities now, not junior-only.
+        "('l3','Senior Backend Engineer','Globex','sr-be','senior','b2b','remote','backend','25000','35000','PLN','2026-08-02','Java, Spring','Warszawa')"
         ") AS t(listing_id,title,company_name,slug,seniority,employment_type,workplace_type,"
         "category,salary_min,salary_max,currency,posted_date,technologies,cities)"
     )
@@ -162,6 +164,17 @@ def test_top_hiring_companies(serving):
     rows = serving.top_hiring_companies()
     assert rows[0]["company_name"] == "Acme"
     assert rows[0]["listing_count"] == 2
+
+
+def test_company_intel_all_seniorities(serving):
+    """The snapshot is all-seniorities now: a senior-only company is found."""
+    data = serving.company_intel("globex")
+    assert data is not None
+    assert data["listing_count"] == 1
+    assert data["sample_titles"] == ["Senior Backend Engineer"]
+    # A senior listing surfaces in the top-hiring rollup too.
+    companies = {r["company_name"] for r in serving.top_hiring_companies()}
+    assert "Globex" in companies
 
 
 def test_hot_technologies(serving):

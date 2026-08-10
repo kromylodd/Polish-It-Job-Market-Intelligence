@@ -27,8 +27,11 @@ ALERTS_SENT_TABLE = "job_market.gold.telegram_alerts_sent"
 
 # Default filter config — used when user_config.json doesn't exist.
 # In production, the user sets this via the bot's /tolerance, /tech, etc.
+# Mirrors telegram_bot.filters.DEFAULT_USER_CONFIG (all seniorities enabled) so
+# the fallback isn't narrower than the bot's own default now that the alert
+# source is the all-seniorities mart_market_snapshot.
 DEFAULT_FILTER_CONFIG = {
-    "seniorities": ["junior", "mid"],
+    "seniorities": ["intern", "junior", "mid", "senior", "lead", "manager", "c_level"],
     "technologies": [],
     "categories": [],
     "workplace_types": [],
@@ -306,7 +309,7 @@ if can_reach:
     yesterday_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
     try:
-        df = spark.table("job_market.gold.mart_junior_market_snapshot").filter(
+        df = spark.table("job_market.gold.mart_market_snapshot").filter(
             col("posted_date") >= yesterday_date
         )
     except Exception:

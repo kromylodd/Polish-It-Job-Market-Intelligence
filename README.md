@@ -159,7 +159,7 @@ graph LR
     fact_job_listings --> bridge_listing_city
     bridge_listing_technology --> dim_technology
     bridge_listing_city --> dim_city
-    fact_job_listings --> marts["marts: salary_by_technology · demand_by_technology ·<br/>tech_co_occurrence · city_summary · market_trends ·<br/>junior_market_snapshot"]
+    fact_job_listings --> marts["marts: salary_by_technology · demand_by_technology ·<br/>tech_co_occurrence · city_summary · market_trends ·<br/>market_snapshot (+ junior_market_snapshot view)"]
 ```
 
 A single listing can require many technologies and span multiple cities, so `bridge_listing_technology` and `bridge_listing_city` model those many-to-many relationships rather than flattening or exploding the fact table.
@@ -173,7 +173,8 @@ A single listing can require many technologies and span multiple cities, so `bri
 | `mart_demand_by_technology` | `/trend <tech>` — weekly demand + WoW change |
 | `mart_market_trends` | `/trend`, `/report` — rolling volume & salary trend |
 | `mart_city_summary` | city-level listings & salary rollups |
-| `mart_junior_market_snapshot` | daily alerts + `/latest` (junior-focused source) |
+| `mart_market_snapshot` | daily alerts + `/latest` + `/company` (all seniorities) |
+| `mart_junior_market_snapshot` | junior-only view over `mart_market_snapshot` (backward-compat) |
 
 ## Reliability Engineering (the hard parts)
 
@@ -290,7 +291,6 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 
 - **Databricks Free Edition throttles.** Job triggers can return `FEATURE_DISABLED` and SQL warehouses go cold. The batch pipeline tolerates this via retries; the bot sidesteps it entirely with the DuckDB serving cache. But **premium analytics show "data not ready" until the warehouse is reachable for at least one successful sync**, and the batch pipeline can occasionally skip a day when Databricks is fully throttled.
 - **No keyless (OIDC/WIF) CI auth.** Free Edition lacks the account-level API access needed for workload identity federation (the pattern used in project #1), so CI/CD uses a PAT in a GitHub secret. Documented trade-off, not an oversight.
-- **The gold source for alerts is junior-focused.** `mart_junior_market_snapshot` filters to junior roles; a user filtering for senior/mid currently gets fewer matches. A broader all-seniorities mart is the next data-model step.
 - **Outbound networking from Databricks serverless is restricted.** Scraping and the interactive bot run outside Databricks (GitHub Actions / a systemd host), not inside serverless compute.
 - **~10k listing cap per scrape** from justjoin.it's API pagination — a representative daily snapshot, not a full census, for the very largest result sets.
 - **Payments are wired but lightly exercised.** The full Stars checkout flow is implemented and unit-tested, but real-world volume is minimal — it's a functioning MVP monetization path, not a battle-tested billing system (no refund UI, no proration beyond simple stacking).
@@ -298,7 +298,6 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 
 ## Roadmap
 
-- All-seniorities gold mart so premium alerts cover senior/mid, not just junior.
 - Real payment lifecycle: refunds, grace periods, renewal reminders.
 - Lakeview dashboard on the gold marts for a visual/BI companion to the bot.
 - Lower the scrape delay now that 429 `Retry-After` handling exists (roughly halves runtime).

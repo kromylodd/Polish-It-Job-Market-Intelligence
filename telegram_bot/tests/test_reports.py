@@ -26,7 +26,7 @@ def modules(tmp_path, monkeypatch):
         "rolling_7d_listings,rolling_7d_avg_salary)"
     )
     con.execute(
-        "CREATE TABLE junior_snapshot AS SELECT * FROM (VALUES "
+        "CREATE TABLE market_snapshot AS SELECT * FROM (VALUES "
         "('l1','Junior Dev','Acme','s1','junior','b2b','remote','python','7000','9000','PLN','2026-08-01','Python','Warszawa'),"
         "('l2','Data Analyst','Acme','s2','junior','b2b','hybrid','data','6000','8000','PLN','2026-08-01','SQL','Kraków'),"
         "('l3','QA','Globex','s3','junior','b2b','office','testing','5000','7000','PLN','2026-08-01','Selenium','Gdańsk')"

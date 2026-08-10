@@ -53,7 +53,7 @@ MARTS: dict[str, str] = {
     "tech_co_occurrence": "job_market.gold.mart_tech_co_occurrence",
     "demand_by_technology": "job_market.gold.mart_demand_by_technology",
     "city_summary": "job_market.gold.mart_city_summary",
-    "junior_snapshot": "job_market.gold.mart_junior_market_snapshot",
+    "market_snapshot": "job_market.gold.mart_market_snapshot",
 }
 
 # Consider the cache stale after this many seconds (used to decide auto-refresh).
@@ -478,14 +478,14 @@ def tech_demand_trend(tech: str, limit: int = 12) -> list[dict]:
 
 
 def company_intel(company: str) -> dict | None:
-    """Junior-listing intel for a company from the snapshot mart.
+    """Listing intel for a company from the all-seniorities snapshot mart.
 
     Returns listing_count, avg salary range, and a few sample titles. Uses a
     substring (case-insensitive) match so partial names work.
     """
     rows = _query(
         "SELECT title, salary_min, salary_max, currency, seniority, workplace_type "
-        "FROM junior_snapshot WHERE lower(company_name) LIKE lower(?)",
+        "FROM market_snapshot WHERE lower(company_name) LIKE lower(?)",
         [f"%{company}%"],
     )
     if not rows:
@@ -506,7 +506,7 @@ def top_hiring_companies(limit: int = 10) -> list[dict]:
     """Companies with the most listings in the current snapshot."""
     return _query(
         "SELECT company_name, count(*) AS listing_count "
-        "FROM junior_snapshot WHERE company_name IS NOT NULL "
+        "FROM market_snapshot WHERE company_name IS NOT NULL "
         "GROUP BY company_name ORDER BY listing_count DESC LIMIT ?",
         [limit],
     )

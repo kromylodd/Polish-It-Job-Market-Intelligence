@@ -1243,7 +1243,7 @@ def _query_databricks_latest(config: dict) -> list[dict]:
                employment_type, workplace_type, category,
                salary_min, salary_max, currency,
                posted_date, technologies, cities
-        FROM job_market.gold.mart_junior_market_snapshot
+        FROM job_market.gold.mart_market_snapshot
         ORDER BY posted_date DESC
         LIMIT 100
     """

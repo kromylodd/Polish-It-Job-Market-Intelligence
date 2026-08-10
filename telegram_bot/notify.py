@@ -111,7 +111,7 @@ def query_recent_listings(conn) -> list[dict]:
                employment_type, workplace_type, category,
                salary_min, salary_max, currency,
                posted_date, technologies, cities
-        FROM job_market.gold.mart_junior_market_snapshot
+        FROM job_market.gold.mart_market_snapshot
         ORDER BY posted_date DESC
         LIMIT 500
     """
