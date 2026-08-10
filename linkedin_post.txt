@@ -1,0 +1,41 @@
+Most portfolio data projects die at a dashboard nobody opens.
+
+So I built one that answers the only 3 questions a job seeker actually asks — every day, in under a second, right inside Telegram.
+
+Meet Polish IT Job Market Intelligence: a lakehouse pipeline that ends in a bot people actually use, not a chart that gets screenshotted once.
+
+Every day it pulls ~10k live Polish IT listings through a Databricks medallion pipeline (bronze → silver → gold), models them into a dbt star schema, passes a data-quality gate — and the gold tables answer, instantly:
+
+→ "What should I learn?" — /skills Python returns "often requested with: SQL 71%, Airflow 43%." No other Polish job bot does technology co-occurrence.
+→ "Where should I apply?" — /company Allegro shows live openings, salary range, sample roles.
+→ "What should I earn?" — /salary Python [senior] gives real percentiles per seniority.
+
+Plus daily push alerts, a 7-dimension filter system, a one-tap application tracker — and a paid tier billed in Telegram Stars, with the full checkout flow wired end to end.
+
+The part I'm most proud of isn't a feature — it's a trade-off.
+
+Databricks Free warehouses go cold and take tens of seconds to wake. Unacceptable for a bot a user is staring at. So the bot never queries the warehouse live: it syncs the small gold marts into a local DuckDB cache and answers every query from there — instant, offline-capable, immune to cold starts. Databricks is the system of record; DuckDB is a disposable read-cache next to the app.
+
+This is the deliberate sequel to my first data platform (Polish Housing), which was GCP-native: BigQuery, GCS, Airflow, Terraform, Great Expectations, Power BI.
+
+This one is a completely different stack I hadn't touched before — on purpose:
+• Databricks — Unity Catalog + Delta Lake
+• PySpark for the transforms
+• Databricks Workflows (a 2nd orchestrator)
+• Databricks Asset Bundles (a 2nd IaC tool)
+• DuckDB as a sub-second serving cache
+• python-telegram-bot + Telegram Stars payments
+• SQLite state, matplotlib charts, systemd hosting
+
+Two platforms, same class of system, engineered from scratch — because I'd rather prove I can design the architecture than memorize one vendor.
+
+I documented the failures too: a cold-warehouse hang that froze the bot for 15 minutes, a masked dbt failure that showed green while skipping every downstream table, a 39MB upload that stalled until I gzipped it 10x. The honest caveats are in the README on purpose.
+
+I'm launching publicly this week. Before I do, I want the read from people who've shipped and hired more than I have:
+
+If you were reviewing this as a hiring manager — or you've launched a side project to real users — what's the ONE thing you'd fix or add before it goes live? I'd genuinely rather hear it now than after launch.
+
+Full write-up + architecture diagrams: repo link in comments.
+Connect: https://www.linkedin.com/in/daniil-demidov-a610753a9/
+
+#DataEngineering #Databricks #PySpark #dbt #DuckDB #Lakehouse

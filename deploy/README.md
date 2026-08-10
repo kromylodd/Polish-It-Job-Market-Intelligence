@@ -44,10 +44,98 @@ provider token). Nothing extra to configure in code, but Stars must be enabled
 for your bot (they are by default for bots created via BotFather). Test the flow
 with `/subscribe` → pick a tier → complete the in-app Stars checkout.
 
-## Option A — systemd on a VPS (recommended: Oracle Cloud Always Free)
+## Quick deploy (one script)
 
-Oracle Cloud's Always Free Ampere ARM VM runs 24/7 at no cost and is the top
-pick. Google Cloud `e2-micro` free tier also works.
+Once you have SSH access to an always-on Linux VM (see Option A for a free one),
+the whole deployment is a single idempotent script — `deploy/setup_vm.sh`. It
+installs system packages, builds the venv, installs requirements, writes a
+systemd **user** service, enables linger (so the bot survives logout **and**
+reboot), and starts it.
+
+```bash
+# on the VM
+git clone <your-repo-url> ~/polish-it-job-market-intelligence
+cd ~/polish-it-job-market-intelligence
+# from your laptop, copy your secrets up (see env vars below):
+#   scp -i <key> .env <vm-user>@<vm-ip>:~/polish-it-job-market-intelligence/.env
+./deploy/setup_vm.sh
+journalctl --user -u telegram-bot -f      # follow logs
+```
+
+Re-run it any time after a `git pull` to redeploy. When the cloud bot is
+confirmed responding, **stop the laptop copy** so two instances don't fight over
+the token (`Conflict: terminated by other getUpdates`):
+
+```bash
+systemctl --user disable --now telegram-bot   # run this ON YOUR LAPTOP
+```
+
+The manual steps below (Option A / Option B) are kept for reference and for the
+system-service-on-a-VPS variant.
+
+## Option A — systemd on a free-tier VM (recommended: GCP e2-micro)
+
+Google Cloud's `e2-micro` (2 shared vCPU, 1 GB RAM) is free-forever in
+`us-west1`, `us-central1`, or `us-east1` with a 30 GB `pd-standard` disk. The
+bot idles at ~60 MB RSS so this is plenty.
+
+### Provisioning the VM (one-time)
+
+```bash
+# create a dedicated project (keeps billing/IAM separate from other GCP work)
+gcloud projects create polish-it-jobs-bot --name="Polish IT Jobs Bot"
+gcloud billing projects link polish-it-jobs-bot \
+  --billing-account=$(gcloud billing accounts list --format='value(ACCOUNT_ID)' | head -1)
+gcloud services enable compute.googleapis.com --project=polish-it-jobs-bot
+
+# create the instance
+gcloud compute instances create telegram-bot \
+  --project=polish-it-jobs-bot \
+  --zone=us-west1-b \
+  --machine-type=e2-micro \
+  --image-family=debian-12 \
+  --image-project=debian-cloud \
+  --boot-disk-size=30GB \
+  --boot-disk-type=pd-standard \
+  --tags=telegram-bot \
+  --metadata=startup-script='#!/bin/bash
+apt-get update && apt-get install -y python3-venv python3-pip git'
+
+# firewall: SSH only (the bot uses long-polling, no inbound ports needed)
+gcloud compute firewall-rules create allow-ssh-bot \
+  --project=polish-it-jobs-bot \
+  --direction=INGRESS \
+  --action=ALLOW \
+  --rules=tcp:22 \
+  --source-ranges=0.0.0.0/0 \
+  --target-tags=telegram-bot
+```
+
+### SSH into the VM
+
+```bash
+gcloud compute ssh telegram-bot --zone=us-west1-b --project=polish-it-jobs-bot
+```
+
+This auto-creates and manages SSH keys for you — no manual key setup.
+
+### Deploying the bot
+
+```bash
+# on the VM (after SSH-ing in)
+git clone https://github.com/kromylodd/Polish-It-Job-Market-Intelligence.git ~/polish-it-job-market-intelligence
+cd ~/polish-it-job-market-intelligence
+
+# copy your .env from your laptop (run this ON YOUR LAPTOP in another terminal):
+#   gcloud compute scp .env telegram-bot:~/polish-it-job-market-intelligence/.env \
+#     --zone=us-west1-b --project=polish-it-jobs-bot
+
+# deploy (idempotent — re-run after git pull to redeploy)
+./deploy/setup_vm.sh
+journalctl --user -u telegram-bot -f
+```
+
+### Manual system-service variant (if not using setup_vm.sh)
 
 ```bash
 # on the VM
@@ -65,6 +153,25 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now telegram-bot
 journalctl -u telegram-bot -f
 ```
+
+### Free-tier cost breakdown
+
+| Resource | Free allowance | Bot usage |
+|---|---|---|
+| e2-micro instance | 744 hrs/month (1 instance, eligible regions) | 744 hrs (always-on) |
+| pd-standard disk | 30 GB | 30 GB |
+| Egress | 1 GB/month (to worldwide excl. China/Australia) | ~100 MB (Telegram API calls) |
+| **Total** | — | **$0/month** |
+
+> The free tier is per-billing-account. If you already use a free e2-micro in
+> another project under the same billing account, this VM will incur charges
+> (~$6.11/month for e2-micro in us-west1).
+
+### Alternative: Oracle Cloud Always Free
+
+If you have an Oracle Cloud account, their Always Free Ampere ARM VM (4 OCPU,
+24 GB RAM) is even more generous. The deployment steps are identical once you
+have SSH access — clone, copy `.env`, run `setup_vm.sh`.
 
 ## Option B — Docker
 
@@ -90,3 +197,33 @@ cd ~/polish-it-job-market-intelligence
 set -a && source .env && set +a
 python3 -m telegram_bot.bot
 ```
+
+## Decisions log
+
+### 2026-08-10: GCP over Oracle Cloud
+
+**Context:** Couldn't create an Oracle Cloud account (verification issues).
+
+**Decision:** GCP `e2-micro` free tier instead. Created a **separate GCP project**
+(`polish-it-jobs-bot`) rather than reusing the `silesia-housing` project from the
+housing platform because:
+
+1. Clean billing visibility — bot costs isolated ($0, but verifiable).
+2. No Terraform state drift — the housing project's IAM/infra is Terraform-managed;
+   adding a VM there without updating `.tf` files would cause drift.
+3. Portfolio separation — two projects, two GCP projects, no coupling.
+
+The free tier applies at the billing-account level, so both projects share the
+same billing account and the bot VM is still free.
+
+**Alternatives evaluated:**
+- Oracle Cloud Always Free (best specs but account creation blocked)
+- Hetzner CX22 (~€3.29/month, no free tier)
+- Fly.io free tier (unreliable for always-on long-polling)
+- Railway/Render (sleep idle containers — breaks long-polling)
+
+**VM details:**
+- Instance: `telegram-bot`, zone `us-west1-b`, `e2-micro`
+- OS: Debian 12, 30 GB `pd-standard`
+- Firewall: SSH only, no inbound HTTP/HTTPS (bot uses outbound long-polling)
+- Startup script pre-installs `python3-venv`, `python3-pip`, `git`

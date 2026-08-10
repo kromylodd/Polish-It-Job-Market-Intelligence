@@ -4,7 +4,7 @@ An end-to-end **lakehouse data platform + monetizable product** for Poland's IT 
 
 [![CI](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/ci.yml)
 [![Daily Scrape](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/scrape.yml/badge.svg)](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/scrape.yml)
-[![tests](https://img.shields.io/badge/tests-88%20passing-success)](#testing)
+[![tests](https://img.shields.io/badge/tests-89%20passing-success)](#testing)
 [![Databricks](https://img.shields.io/badge/Databricks-Lakehouse-FF3621?logo=databricks&logoColor=white)](#tech-stack)
 
 > **Stage 3 companion** to the [Polish Housing Market Intelligence Platform](https://github.com/kromylodd/Polish-Housing-Market-Intelligence-Platform) — deliberately built on a **different stack** (Databricks / PySpark / Delta Lake / Asset Bundles vs. GCP / BigQuery / Airflow / Terraform) to demonstrate cross-platform fluency, then taken one step further: this one ships a **user-facing product with a payment layer** on top of the warehouse.
@@ -106,7 +106,7 @@ The gold marts aren't just for a dashboard — they back a live bot ([@polish_it
 - `/myskills python sql airflow` — save your stack; `/latest` results get **ranked by % skill overlap** (a simple, explainable recommendation layer — no ML needed, but it reads like one).
 
 **Premium (`/premium` menu, billed in Telegram Stars):**
-- `/salary Python [senior]` — median / average / min-max, plus a per-seniority breakdown, from `mart_salary_by_technology`.
+- `/salary Python [senior]` — median plus a **P25–P75 typical range**, broken out **by contract type** (permanent/UoP vs B2B vs mandate) so monthly UoP pay isn't blended with per-hour B2B rates, plus a per-seniority breakdown, from `mart_salary_by_technology`. B2B/mandate rates aren't period-normalized upstream yet, so they're shown separately and flagged (see [Known Limitations](#known-limitations--honest-caveats)).
 - `/skills Python` — "often requested with: SQL 71%, Airflow 43% …" from `mart_tech_co_occurrence`. **This is the standout feature — no other Polish job-alert bot does technology co-occurrence.**
 - `/trend [tech]` — market-wide or per-technology demand trends, rendered as matplotlib charts.
 - `/company Allegro` — how many current listings, salary range, sample roles.
@@ -221,7 +221,7 @@ polish-it-job-market-intelligence/
 ├── deploy/
 │   ├── Dockerfile                  # bot image (non-root, headless matplotlib)
 │   ├── telegram-bot.service        # systemd unit
-│   └── README.md                   # Oracle Cloud Always Free hosting guide
+│   └── README.md                   # GCP e2-micro free-tier hosting guide
 └── .github/workflows/
     ├── ci.yml                      # lint, format, tests, dbt-parse
     ├── scrape.yml                  # daily scrape → upload → trigger → poll → notify
@@ -234,7 +234,7 @@ polish-it-job-market-intelligence/
 
 | Job | What it does |
 |---|---|
-| `lint-and-test` | `ruff check .`, `ruff format --check .`, `black --check .`, `pytest` (88 tests) |
+| `lint-and-test` | `ruff check .`, `ruff format --check .`, `black --check .`, `pytest` (89 tests) |
 | `dbt-parse` | `dbt deps` + `dbt parse` (pinned dbt-databricks) to catch model errors early |
 
 **`.github/workflows/scrape.yml`** — daily (06:00 UTC) + manual: scrape → gzip upload → **trigger the Databricks job via the Jobs API with host normalization and `FEATURE_DISABLED` retry** → poll the run to completion → run the Telegram notifier only once gold data is ready.
@@ -247,13 +247,13 @@ The bot is long-polling (no inbound ports), so any always-on Linux box works.
 
 - **systemd (used now):** runs as a user service on the host, `Restart=on-failure`, `loginctl enable-linger` so it survives logout/reboot. See `deploy/telegram-bot.service`.
 - **Docker:** `deploy/Dockerfile` builds a non-root image with a persistent volume for the SQLite stores + DuckDB cache.
-- **24/7 recommendation:** Oracle Cloud Always Free (Ampere ARM VM) — full guide in `deploy/README.md`.
+- **24/7 recommendation:** GCP `e2-micro` free tier (Debian 12, `us-west1`) — full guide in `deploy/README.md`.
 
 ## Testing
 
 ```bash
 pip install -r telegram_bot/requirements.txt
-pytest -q            # 88 tests: scraper parser, filters, analytics, config,
+pytest -q            # 89 tests: scraper parser, filters, analytics, config,
                      # serving layer, application tracker, Stars payments, reports
 ```
 
@@ -291,6 +291,7 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 - **Databricks Free Edition throttles.** Job triggers can return `FEATURE_DISABLED` and SQL warehouses go cold. The batch pipeline tolerates this via retries; the bot sidesteps it entirely with the DuckDB serving cache. But **premium analytics show "data not ready" until the warehouse is reachable for at least one successful sync**, and the batch pipeline can occasionally skip a day when Databricks is fully throttled.
 - **No keyless (OIDC/WIF) CI auth.** Free Edition lacks the account-level API access needed for workload identity federation (the pattern used in project #1), so CI/CD uses a PAT in a GitHub secret. Documented trade-off, not an oversight.
 - **The gold source for alerts is junior-focused.** `mart_junior_market_snapshot` filters to junior roles; a user filtering for senior/mid currently gets fewer matches. A broader all-seniorities mart is the next data-model step.
+- **Salary isn't period-normalized upstream.** justjoin.it quotes permanent (UoP) pay per month but B2B / mandate rates per hour *or* month in the same field, with no period marker carried through — so B2B figures in `mart_salary_by_technology` mix hourly and monthly values. `/salary` mitigates this by showing each contract type **separately** with a P25–P75 range (not raw min/max) and flagging the un-normalized B2B/mandate groups; the upstream fix (detect period, normalize B2B→monthly in silver) is tracked in `TODO.md`.
 - **Outbound networking from Databricks serverless is restricted.** Scraping and the interactive bot run outside Databricks (GitHub Actions / a systemd host), not inside serverless compute.
 - **~10k listing cap per scrape** from justjoin.it's API pagination — a representative daily snapshot, not a full census, for the very largest result sets.
 - **Payments are wired but lightly exercised.** The full Stars checkout flow is implemented and unit-tested, but real-world volume is minimal — it's a functioning MVP monetization path, not a battle-tested billing system (no refund UI, no proration beyond simple stacking).
@@ -302,7 +303,7 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 - Real payment lifecycle: refunds, grace periods, renewal reminders.
 - Lakeview dashboard on the gold marts for a visual/BI companion to the bot.
 - Lower the scrape delay now that 429 `Retry-After` handling exists (roughly halves runtime).
-- Optional: move the bot to Oracle Cloud Always Free for true 24/7 independence from a laptop.
+- ~~Move the bot to a free-tier cloud VM for true 24/7 independence from a laptop.~~ ✅ Done — GCP `e2-micro` in `us-west1-b`.
 
 ## Scraping Ethics
 

@@ -19,8 +19,13 @@ def serving(tmp_path, monkeypatch):
     # All columns VARCHAR to mirror how sync_marts stores them.
     con.execute(
         "CREATE TABLE salary_by_technology AS SELECT * FROM (VALUES "
+        # B2B rows (period NOT normalized upstream — hourly/monthly mixed).
         "('Python','junior','b2b','PLN','10','8000','12000','10000','9500','8000','11000','6000','15000'),"
-        "('Python','senior','b2b','PLN','20','18000','26000','22000','21000','19000','24000','15000','30000')"
+        "('Python','senior','b2b','PLN','20','18000','26000','22000','21000','19000','24000','15000','30000'),"
+        # Permanent/UoP rows (monthly). Senior row carries a 600k outlier max to
+        # prove min/max are NOT used (we report the p25-p75 band instead).
+        "('Python','junior','permanent','PLN','15','12000','16000','14000','14000','12000','16000','8000','20000'),"
+        "('Python','senior','permanent','PLN','30','24000','34000','29000','26000','22000','33500','18000','600000')"
         ") AS t(technology_name,seniority,employment_type,currency,listing_count,"
         "avg_salary_min,avg_salary_max,avg_salary_mid,median_salary,p25_salary,p75_salary,"
         "min_salary,max_salary)"
@@ -67,17 +72,43 @@ def test_is_ready(serving):
 def test_salary_for_tech(serving):
     stats = serving.salary_for_tech("python")
     assert stats is not None
-    assert stats["listing_count"] == 30  # 10 + 20
-    assert stats["min"] == 6000
-    assert stats["max"] == 30000
-    # Weighted average mid: (10000*10 + 22000*20) / 30 = 18000
-    assert stats["avg_mid"] == 18000
+    assert stats["listing_count"] == 75  # 10 + 20 + 15 + 30
+    groups = {g["basis"]: g for g in stats["groups"]}
+    assert set(groups) == {"permanent", "b2b"}
+    # Permanent (normalized) group is listed first.
+    assert stats["groups"][0]["basis"] == "permanent"
+
+    perm = groups["permanent"]
+    assert perm["normalized"] is True
+    assert perm["count"] == 45  # 15 + 30
+    # Weighted median: (14000*15 + 26000*30) / 45 = 22000
+    assert perm["median"] == 22000
+    # P25/P75 band is used instead of raw min/max — the 600k outlier never shows.
+    assert perm["p25"] == 18667  # (12000*15 + 22000*30)/45
+    assert perm["p75"] == 27667  # (16000*15 + 33500*30)/45
+
+    b2b = groups["b2b"]
+    assert b2b["normalized"] is False
+    assert b2b["count"] == 30  # 10 + 20
+    assert b2b["median"] == 17167  # (9500*10 + 21000*20)/30
+
+
+def test_salary_for_tech_no_raw_extremes(serving):
+    """Regression: the 600k outlier max must never surface in any group."""
+    stats = serving.salary_for_tech("python")
+    for g in stats["groups"]:
+        assert g["p75"] is None or g["p75"] < 100000
+        assert "min" not in g and "max" not in g
 
 
 def test_salary_for_tech_seniority_filter(serving):
     stats = serving.salary_for_tech("Python", "senior")
-    assert stats["listing_count"] == 20
-    assert stats["avg_mid"] == 22000
+    assert stats["listing_count"] == 50  # 20 b2b + 30 permanent
+    groups = {g["basis"]: g for g in stats["groups"]}
+    assert groups["permanent"]["median"] == 26000
+    assert groups["permanent"]["p25"] == 22000
+    assert groups["permanent"]["p75"] == 33500
+    assert groups["b2b"]["median"] == 21000
 
 
 def test_salary_for_tech_unknown(serving):
@@ -88,6 +119,10 @@ def test_salary_by_seniority_order(serving):
     rows = serving.salary_by_seniority("python")
     seniorities = [r["seniority"] for r in rows]
     assert seniorities == ["junior", "senior"]  # sorted by rank
+    # Permanent/UoP PLN medians only (B2B excluded).
+    by_sen = {r["seniority"]: r for r in rows}
+    assert by_sen["junior"]["median"] == 14000
+    assert by_sen["senior"]["median"] == 26000
 
 
 def test_skills_for_tech(serving):

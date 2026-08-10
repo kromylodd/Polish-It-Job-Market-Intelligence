@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import logging
+from datetime import datetime
 
 from telegram_bot import serving
 
@@ -113,6 +114,21 @@ def build_tech_demand_chart(tech: str) -> bytes | None:
 # --------------------------------------------------------------------------- #
 # matplotlib rendering (lazy, guarded)
 # --------------------------------------------------------------------------- #
+def _short_date(val) -> str:
+    """Compact axis label from a date/timestamp value, e.g. 'Aug 3'.
+
+    The marts store dates as strings that can carry a time + timezone
+    (``2026-08-03 02:00:00+02``); we only want the calendar day on a chart axis.
+    Falls back to the raw string if it doesn't parse.
+    """
+    s = str(val)
+    try:
+        dt = datetime.strptime(s[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return s
+    return f"{dt:%b} {dt.day}"
+
+
 def _matplotlib():
     """Import matplotlib with a non-interactive backend. None if unavailable."""
     try:
@@ -144,7 +160,9 @@ def _render_dual_axis(x, y_left, y_right, *, title, left_label, right_label) -> 
 
         step = max(1, len(x) // 8)
         ax1.set_xticks(range(0, len(x), step))
-        ax1.set_xticklabels([str(x[i]) for i in range(0, len(x), step)], rotation=45, ha="right")
+        ax1.set_xticklabels(
+            [_short_date(x[i]) for i in range(0, len(x), step)], rotation=45, ha="right"
+        )
         ax1.set_title(title)
         fig.tight_layout()
         return _fig_to_png(plt, fig)
@@ -162,7 +180,9 @@ def _render_bars(x, y, *, title, ylabel) -> bytes | None:
         ax.bar(range(len(x)), y, color="#2563eb")
         step = max(1, len(x) // 12)
         ax.set_xticks(range(0, len(x), step))
-        ax.set_xticklabels([str(x[i]) for i in range(0, len(x), step)], rotation=45, ha="right")
+        ax.set_xticklabels(
+            [_short_date(x[i]) for i in range(0, len(x), step)], rotation=45, ha="right"
+        )
         ax.set_ylabel(ylabel)
         ax.set_title(title)
         fig.tight_layout()

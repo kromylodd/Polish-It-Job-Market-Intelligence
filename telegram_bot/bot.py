@@ -211,7 +211,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /salary — minimum salary\n"
         "  /city — location filter\n\n"
         "<b>💎 Premium</b> — open the menu with /premium (or /subscribe):\n"
-        "  /salary &lt;tech&gt; — salary min/median/max\n"
+        "  /salary &lt;tech&gt; — salary by contract type (UoP vs B2B)\n"
         "  /trend [tech] — market &amp; demand trends\n"
         "  /skills &lt;tech&gt; — co-occurring technologies\n"
         "  /company &lt;name&gt; — company hiring intel\n"
@@ -692,7 +692,7 @@ async def cmd_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<i>(monthly PLN — listings paying less won't match)</i>\n"
             f"<b>Clear:</b> /salary clear\n\n"
             f"<b>💎 Salary insights:</b> /salary python\n"
-            f"<i>(min/median/max for a technology — premium)</i>",
+            f"<i>(median + typical range per contract type — premium)</i>",
             parse_mode="HTML",
         )
         return
@@ -719,7 +719,7 @@ async def _salary_insights(update: Update, args: list[str]):
     tech = args[0]
     seniority = args[1].lower() if len(args) > 1 else None
     stats = await asyncio.to_thread(serving.salary_for_tech, tech, seniority)
-    if not stats:
+    if not stats or not stats.get("groups"):
         await update.message.reply_text(
             f"📭 No salary data for <b>{tech}</b>"
             + (f" ({seniority})" if seniority else "")
@@ -728,25 +728,39 @@ async def _salary_insights(update: Update, args: list[str]):
         )
         return
 
-    cur = stats.get("currency", "PLN")
     lines = [f"💰 <b>Salary — {tech}</b>" + (f" · {seniority}" if seniority else "")]
     lines.append(f"<i>Based on {stats['listing_count']} listings</i>\n")
-    if stats.get("median") is not None:
-        lines.append(f"📊 Median: <b>{stats['median']} {cur}</b>")
-    if stats.get("avg_mid") is not None:
-        lines.append(f"⌀ Average: {stats['avg_mid']} {cur}")
-    if stats.get("min") is not None and stats.get("max") is not None:
-        lines.append(f"📉 Range: {stats['min']} – {stats['max']} {cur}")
 
-    # Per-seniority breakdown (only when not already filtered to one).
+    # One block per contract basis + currency (permanent/UoP shown first). We
+    # deliberately DON'T blend UoP and B2B: their pay is quoted on different
+    # bases (monthly vs per-hour), so a single median/range would be misleading.
+    for g in stats["groups"]:
+        cur = g["currency"]
+        head = f"<b>{g['label']}</b> · {cur} · {g['count']} listings"
+        if not g["normalized"]:
+            head += " ⚠️"
+        lines.append(head)
+        if g.get("median") is not None:
+            lines.append(f"  📊 Median: <b>{g['median']} {cur}</b>")
+        if g.get("p25") is not None and g.get("p75") is not None:
+            lines.append(f"  📉 Typical (25–75%): {g['p25']} – {g['p75']} {cur}")
+        lines.append("")
+
+    if any(not g["normalized"] for g in stats["groups"]):
+        lines.append(
+            "⚠️ <i>B2B/mandate rates are quoted per hour or per month and aren't "
+            "period-normalized yet — treat those figures as indicative.</i>"
+        )
+
+    # Per-seniority breakdown (permanent/UoP median), only when not filtered.
     if not seniority:
         by_sen = await asyncio.to_thread(serving.salary_by_seniority, tech)
-        rows = [r for r in by_sen if r.get("avg_mid")]
+        rows = [r for r in by_sen if r.get("median")]
         if len(rows) > 1:
-            lines.append("\n<b>By seniority (avg):</b>")
+            lines.append("\n<b>By seniority (UoP median, PLN):</b>")
             for r in rows:
                 label = ALL_SENIORITIES.get((r.get("seniority") or "").lower(), r.get("seniority"))
-                lines.append(f"  {label}: {round(r['avg_mid'])} {cur} ({int(r['n'])})")
+                lines.append(f"  {label}: {round(r['median'])} ({int(r['n'])})")
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 

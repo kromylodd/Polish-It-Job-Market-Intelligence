@@ -270,12 +270,39 @@ def _num(value: Any) -> float | None:
         return None
 
 
-def salary_for_tech(tech: str, seniority: str | None = None) -> dict | None:
-    """Aggregate salary stats for a technology (optionally by seniority).
+# Contract bases. justjoin.it quotes permanent (UoP) pay per MONTH, but B2B and
+# mandate (umowa zlecenie) rates are quoted per HOUR *or* per month in the same
+# field, with no period normalization upstream. Blending them is what produces
+# nonsense like a 28-PLN "min" next to a 600k "max". Until the pipeline
+# normalizes B2B to a monthly basis (see TODO), we keep the bases separate and
+# only treat permanent/UoP as trustworthy monthly figures.
+_MONTHLY_EMPLOYMENT = {"permanent", "any"}
+_BASIS_LABEL = {
+    "permanent": "Permanent (UoP)",
+    "b2b": "B2B",
+    "mandate": "Mandate (zlecenie)",
+}
 
-    Reads from the ``salary_by_technology`` mart, which is granular by
-    (technology, seniority, employment_type, currency). We aggregate across the
-    remaining dimensions weighted by listing_count. Returns None if no data.
+
+def _basis_for(employment_type: str | None) -> str:
+    et = (employment_type or "").lower()
+    if et in _MONTHLY_EMPLOYMENT:
+        return "permanent"
+    if et == "b2b":
+        return "b2b"
+    return "mandate"
+
+
+def salary_for_tech(tech: str, seniority: str | None = None) -> dict | None:
+    """Salary stats for a technology, split by contract basis + currency.
+
+    Reads the ``salary_by_technology`` mart (granular by technology, seniority,
+    employment_type, currency). Rather than blend everything into one min/max
+    range — which mixes monthly UoP pay with per-hour B2B rates and yields
+    garbage — we group by (contract basis, currency) and report the P25-P75
+    interquartile band the mart already computes, weighted by listing_count.
+    Permanent/UoP groups are flagged ``normalized``; B2B/mandate are not (their
+    period isn't normalized yet — see TODO). Returns None if no data.
     """
     where = ["lower(technology_name) = lower(?)"]
     params: list = [tech]
@@ -289,57 +316,81 @@ def salary_for_tech(tech: str, seniority: str | None = None) -> dict | None:
     if not rows:
         return None
 
+    # Listing-count-weighted median / p25 / p75 per (basis, currency).
+    acc: dict[tuple[str, str], dict] = {}
     total = 0
-    weighted_mid = 0.0
-    mins: list[float] = []
-    maxes: list[float] = []
-    medians: list[tuple[float, int]] = []
     for r in rows:
         cnt = int(_num(r.get("listing_count")) or 0)
         if cnt <= 0:
             continue
         total += cnt
-        mid = _num(r.get("avg_salary_mid"))
-        if mid is not None:
-            weighted_mid += mid * cnt
-        smin = _num(r.get("min_salary"))
-        smax = _num(r.get("max_salary"))
-        med = _num(r.get("median_salary"))
-        if smin is not None:
-            mins.append(smin)
-        if smax is not None:
-            maxes.append(smax)
-        if med is not None:
-            medians.append((med, cnt))
+        key = (_basis_for(r.get("employment_type")), r.get("currency") or "PLN")
+        g = acc.setdefault(
+            key,
+            {
+                "count": 0,
+                "med_w": 0.0,
+                "med_n": 0,
+                "p25_w": 0.0,
+                "p25_n": 0,
+                "p75_w": 0.0,
+                "p75_n": 0,
+            },
+        )
+        g["count"] += cnt
+        for col, wkey, nkey in (
+            ("median_salary", "med_w", "med_n"),
+            ("p25_salary", "p25_w", "p25_n"),
+            ("p75_salary", "p75_w", "p75_n"),
+        ):
+            v = _num(r.get(col))
+            if v is not None:
+                g[wkey] += v * cnt
+                g[nkey] += cnt
     if total == 0:
         return None
 
-    # Weighted median-of-medians approximation.
-    weighted_median = None
-    if medians:
-        weighted_median = sum(m * c for m, c in medians) / sum(c for _, c in medians)
+    groups = []
+    for (basis, currency), g in acc.items():
+        groups.append(
+            {
+                "basis": basis,
+                "label": _BASIS_LABEL.get(basis, basis),
+                "currency": currency,
+                "count": g["count"],
+                "median": round(g["med_w"] / g["med_n"]) if g["med_n"] else None,
+                "p25": round(g["p25_w"] / g["p25_n"]) if g["p25_n"] else None,
+                "p75": round(g["p75_w"] / g["p75_n"]) if g["p75_n"] else None,
+                "normalized": basis == "permanent",
+            }
+        )
+    # Trustworthy (monthly/permanent) groups first, then by listing count desc.
+    groups.sort(key=lambda x: (not x["normalized"], -x["count"]))
 
     return {
         "technology": tech,
         "seniority": seniority,
         "listing_count": total,
-        "avg_mid": round(weighted_mid / total) if total else None,
-        "median": round(weighted_median) if weighted_median is not None else None,
-        "min": round(min(mins)) if mins else None,
-        "max": round(max(maxes)) if maxes else None,
-        "currency": rows[0].get("currency", "PLN"),
+        "groups": groups,
     }
 
 
 def salary_by_seniority(tech: str) -> list[dict]:
-    """Salary breakdown for a tech, one row per seniority (sorted by rank)."""
+    """Per-seniority median for the permanent/UoP PLN basis, sorted by rank.
+
+    Restricted to monthly-quoted permanent contracts (PLN) so the breakdown is
+    comparable across seniorities — B2B hourly rates would distort it (see the
+    salary-period-normalization TODO). Each row: ``seniority``, ``n``, ``median``.
+    """
     rows = _query(
         "SELECT seniority, "
         "sum(CAST(listing_count AS INTEGER)) AS n, "
-        "sum(CAST(avg_salary_mid AS DOUBLE) * CAST(listing_count AS INTEGER)) "
-        "  / nullif(sum(CAST(listing_count AS INTEGER)),0) AS avg_mid "
+        "sum(CAST(median_salary AS DOUBLE) * CAST(listing_count AS INTEGER)) "
+        "  / nullif(sum(CAST(listing_count AS INTEGER)),0) AS median "
         "FROM salary_by_technology WHERE lower(technology_name)=lower(?) "
-        "GROUP BY seniority ORDER BY avg_mid",
+        "  AND lower(employment_type) IN ('permanent','any') "
+        "  AND upper(currency)='PLN' "
+        "GROUP BY seniority ORDER BY median",
         [tech],
     )
     order = {
