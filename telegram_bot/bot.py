@@ -327,6 +327,10 @@ def _build_filters_view(config: dict) -> tuple[str, InlineKeyboardMarkup]:
     display = ", ".join(cities) if cities else "any"
     sections.append(f"🏙️ Cities: {display}")
 
+    skills = config.get("skills", [])
+    display = ", ".join(skills[:6]) + ("…" if len(skills) > 6 else "") if skills else "none"
+    sections.append(f"🧠 My skills: {display}")
+
     sections.append("\n<i>Tap a button to edit:</i>")
 
     keyboard = [
@@ -345,6 +349,9 @@ def _build_filters_view(config: dict) -> tuple[str, InlineKeyboardMarkup]:
         [
             InlineKeyboardButton("🏙️ City", callback_data="menu_city"),
             InlineKeyboardButton("⚙️ Tolerance", callback_data="menu_tolerance"),
+        ],
+        [
+            InlineKeyboardButton("🧠 My Skills", callback_data="menu_myskills"),
         ],
     ]
     return "\n".join(sections), InlineKeyboardMarkup(keyboard)
@@ -389,7 +396,9 @@ async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<code>/tech Python SQL Docker React</code>\n\n"
             "Browse all: /tech list\nClear: /tech clear",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]
+            ),
         )
     elif data == "menu_salary":
         await query.message.edit_text(
@@ -397,7 +406,9 @@ async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Type /salary followed by amount:\n"
             "<code>/salary 10000</code>\n\nClear: /salary clear",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]
+            ),
         )
     elif data == "menu_city":
         await query.message.edit_text(
@@ -405,7 +416,22 @@ async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Type /city followed by names:\n"
             "<code>/city Warszawa Kraków Wrocław</code>\n\nClear: /city clear",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]
+            ),
+        )
+    elif data == "menu_myskills":
+        skills = config.get("skills", [])
+        current = ", ".join(skills) if skills else "none set"
+        await query.message.edit_text(
+            f"🧠 <b>My Skills:</b> {current}\n\n"
+            "Set: <code>/myskills python sql airflow</code>\n"
+            "Clear: <code>/myskills clear</code>\n\n"
+            "<i>Ranks your /latest results by % match. (Free)</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("◀️ Back", callback_data="back_filters")]]
+            ),
         )
     elif data.startswith("toggle_"):
         await _handle_toggle(query, chat_id, config, data)
@@ -2058,9 +2084,8 @@ def _build_premium_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
             ],
             [
                 InlineKeyboardButton("📋 My tracker", callback_data="prem:tracker"),
-                InlineKeyboardButton("🎯 My skills", callback_data="prem:myskills"),
+                InlineKeyboardButton("💎 Subscribe", callback_data="prem:subscribe"),
             ],
-            [InlineKeyboardButton("💎 Subscribe / manage", callback_data="prem:subscribe")],
         ]
     )
     return text, keyboard
