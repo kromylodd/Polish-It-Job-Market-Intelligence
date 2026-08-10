@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import threading
+import zoneinfo
 from pathlib import Path
 
 from telegram import (
@@ -86,6 +87,11 @@ def _parse_admin_chat_id() -> int:
 
 
 ADMIN_CHAT_ID = _parse_admin_chat_id()
+
+# --- Daily broadcast timing (08:00 Warsaw, configurable via env) ---
+WARSAW_TZ = zoneinfo.ZoneInfo("Europe/Warsaw")
+BROADCAST_HOUR = int(os.environ.get("BROADCAST_HOUR", "8"))
+BROADCAST_MINUTE = int(os.environ.get("BROADCAST_MINUTE", "0"))
 
 # Serializes read-modify-write cycles on the shared config file within this process.
 _config_lock = threading.Lock()
@@ -182,11 +188,11 @@ def _enrich_with_caps(snapshot: dict) -> dict:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_new = log_command(update.effective_chat.id, "start")
+    chat_id = update.effective_chat.id
 
     # Log default preferences for new users so they count in statistics
     if is_new:
-        chat_id = update.effective_chat.id
-        config = load_config(update.effective_chat.id)
+        config = load_config(chat_id)
         log_filter_choice(chat_id, "seniority", config.get("seniorities", []))
         log_filter_choice(chat_id, "category", config.get("categories", []))
         log_filter_choice(chat_id, "workplace", config.get("workplace_types", []))
@@ -211,6 +217,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "popular filters) to improve the service. No personal data is stored — "
         "see /privacy.</i>"
     )
+
+    # Activate free trial for brand-new users
+    if is_new:
+        trial_expiry = payments.activate_trial(chat_id)
+        if trial_expiry is not None:
+            exp_str = datetime.datetime.fromtimestamp(trial_expiry, tz=WARSAW_TZ).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            text += (
+                f"\n\n🎁 <b>Welcome gift!</b> You have 24h of free Premium (Plus tier).\n"
+                f"Try /salary Python, /trend, /skills — expires {exp_str} (Warsaw)."
+            )
+
     await update.message.reply_text(text, parse_mode="HTML")
 
 
@@ -260,6 +279,18 @@ async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     config = load_config(chat_id)
     await _send_filters_menu(update.message, config)
+
+
+def _premium_back_kb() -> InlineKeyboardMarkup:
+    """Inline keyboard shown after premium command responses for easy navigation."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("💎 Premium Menu", callback_data="prem:home"),
+                InlineKeyboardButton("🎛️ Filters", callback_data="back_filters"),
+            ]
+        ]
+    )
 
 
 def _build_filters_view(config: dict) -> tuple[str, InlineKeyboardMarkup]:
@@ -386,9 +417,16 @@ async def _callback_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _edit_filters_menu(message, config: dict):
-    """Edit existing message to show filters menu."""
+    """Edit existing message to show filters menu.
+
+    Falls back to sending a new message if the originating message can't be
+    edited into text (e.g. a /trend chart, which is a photo message).
+    """
     text, keyboard = _build_filters_view(config)
-    await message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    try:
+        await message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception:
+        await message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def _handle_toggle(query, chat_id: int, config: dict, data: str):
@@ -785,7 +823,9 @@ async def _salary_insights(update: Update, args: list[str]):
                 label = ALL_SENIORITIES.get((r.get("seniority") or "").lower(), r.get("seniority"))
                 lines.append(f"  {label}: {round(r['median'])} ({int(r['n'])})")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML", reply_markup=_premium_back_kb()
+    )
 
 
 async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1043,6 +1083,44 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+def _current_filter_popularity() -> dict[str, dict[str, int]]:
+    """How many users *currently* have each filter value selected, per dimension.
+
+    Reads the authoritative per-user config store (current choices) rather than
+    the append-only ``filter_choices`` event log. The event log double-counted
+    the always-on defaults (seniority/category/workplace/employment are all
+    selected by default and were re-logged on every /start), which is why those
+    breakdowns showed inflated, misleading numbers. Counting distinct users from
+    the live config fixes that and reflects de-selections too.
+
+    Opted-out users are excluded to honour the privacy setting. Returns
+    ``{dimension: {value: user_count}}`` with each dimension sorted by count desc.
+    """
+    store = config_store.load_local()
+    dims = (
+        "technologies",
+        "categories",
+        "cities",
+        "seniorities",
+        "workplace_types",
+    )
+    counts: dict[str, dict[str, int]] = {d: {} for d in dims}
+    for cid, cfg in store.items():
+        if not isinstance(cfg, dict):
+            continue
+        try:
+            if is_opted_out(int(cid)):
+                continue
+        except (TypeError, ValueError):
+            pass
+        for d in dims:
+            for val in cfg.get(d, []) or []:
+                counts[d][val] = counts[d].get(val, 0) + 1
+    return {
+        d: dict(sorted(v.items(), key=lambda kv: kv[1], reverse=True)) for d, v in counts.items()
+    }
+
+
 async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show aggregated bot usage analytics (admin only)."""
     if update.effective_chat.id != ADMIN_CHAT_ID:
@@ -1066,47 +1144,26 @@ async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  /{cmd}: {count}")
         lines.append("")
 
-    # Top technologies
-    techs = summary.get("top_technologies", {})
-    if techs:
-        lines.append("<b>💻 Most popular technologies:</b>")
-        for tech, count in list(techs.items())[:7]:
-            lines.append(f"  {tech}: {count}")
+    # Current user filter choices, counted once per user from the authoritative
+    # config store (see _current_filter_popularity for why not the event log).
+    pop = await asyncio.to_thread(_current_filter_popularity)
+
+    def _section(title: str, dim: str, labels: dict | None = None, top: int | None = 7):
+        values = pop.get(dim, {})
+        if not values:
+            return
+        lines.append(f"<b>{title}</b>")
+        items = list(values.items())[:top] if top else list(values.items())
+        for val, n in items:
+            label = labels.get(val, val) if labels else val
+            lines.append(f"  {label}: {n} users")
         lines.append("")
 
-    # Top categories
-    cats = summary.get("top_categories", {})
-    if cats:
-        lines.append("<b>📂 Most popular categories:</b>")
-        for cat, count in list(cats.items())[:7]:
-            label = ALL_CATEGORIES.get(cat, cat)
-            lines.append(f"  {label}: {count}")
-        lines.append("")
-
-    # Top cities
-    cities = summary.get("top_cities", {})
-    if cities:
-        lines.append("<b>🏙️ Most popular cities:</b>")
-        for city, count in list(cities.items())[:7]:
-            lines.append(f"  {city}: {count}")
-        lines.append("")
-
-    # Top seniorities
-    sens = summary.get("top_seniorities", {})
-    if sens:
-        lines.append("<b>🎯 Seniority demand:</b>")
-        for sen, count in sens.items():
-            label = ALL_SENIORITIES.get(sen, sen)
-            lines.append(f"  {label}: {count}")
-        lines.append("")
-
-    # Top workplaces
-    wps = summary.get("top_workplaces", {})
-    if wps:
-        lines.append("<b>🏠 Workplace preference:</b>")
-        for wp, count in wps.items():
-            label = ALL_WORKPLACES.get(wp, wp)
-            lines.append(f"  {label}: {count}")
+    _section("💻 Technologies (users' filters):", "technologies")
+    _section("📂 Categories (users' filters):", "categories", ALL_CATEGORIES)
+    _section("🏙️ Cities (users' filters):", "cities")
+    _section("🎯 Seniority (users' filters):", "seniorities", ALL_SENIORITIES, top=None)
+    _section("🏠 Workplace (users' filters):", "workplace_types", ALL_WORKPLACES, top=None)
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -1429,7 +1486,9 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for r in data["related"]:
         pct = f" — {r['pct']}%" if r.get("pct") is not None else ""
         lines.append(f"• {_esc(r['tech'])}: {r['count']} listings{pct}")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML", reply_markup=_premium_back_kb()
+    )
 
 
 async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1456,9 +1515,13 @@ async def cmd_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         png = await asyncio.to_thread(reports.build_tech_demand_chart, tech)
         if png:
-            await update.message.reply_photo(png, caption=caption, parse_mode="HTML")
+            await update.message.reply_photo(
+                png, caption=caption, parse_mode="HTML", reply_markup=_premium_back_kb()
+            )
         else:
-            await update.message.reply_text(caption, parse_mode="HTML")
+            await update.message.reply_text(
+                caption, parse_mode="HTML", reply_markup=_premium_back_kb()
+            )
         return
 
     # No tech → overall market trend.
@@ -1489,9 +1552,17 @@ async def _do_trend_overall(context, chat_id: int):
         lines.append(f"💰 Avg salary (rolling): ~{round(sal_now)} PLN")
     png = await asyncio.to_thread(reports.build_trend_chart)
     if png:
-        await context.bot.send_photo(chat_id, png, caption="\n".join(lines), parse_mode="HTML")
+        await context.bot.send_photo(
+            chat_id,
+            png,
+            caption="\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=_premium_back_kb(),
+        )
     else:
-        await context.bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML")
+        await context.bot.send_message(
+            chat_id, "\n".join(lines), parse_mode="HTML", reply_markup=_premium_back_kb()
+        )
 
 
 async def cmd_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1522,7 +1593,9 @@ async def cmd_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("\n<b>Sample roles:</b>")
         for t in data["sample_titles"]:
             lines.append(f"• {_esc(t)}")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML", reply_markup=_premium_back_kb()
+    )
 
 
 async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2034,7 +2107,12 @@ async def _callback_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "home":
         await query.answer()
         text, keyboard = _build_premium_menu(chat_id)
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception:
+            # Originating message may be a photo (e.g. /trend chart) which can't
+            # be edited into text — send a fresh menu instead.
+            await context.bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=keyboard)
         return
 
     # Keyword-driven items → show usage (respect the paywall).
@@ -2074,6 +2152,25 @@ async def _callback_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_subscribe_menu(context, chat_id)
 
 
+# --- Daily broadcast job (08:00 Warsaw) ---
+
+
+async def _daily_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
+    """Send daily matching listings to all users at 08:00 Warsaw.
+
+    This decouples the broadcast from pipeline completion — users always get
+    their digest at a predictable time regardless of scrape/Databricks timing.
+    """
+    logger.info("Daily broadcast triggered (08:00 Warsaw)")
+    try:
+        from telegram_bot.notify import run_daily_broadcast
+
+        total = await asyncio.to_thread(run_daily_broadcast)
+        logger.info(f"Daily broadcast complete: {total} listings sent")
+    except Exception as e:
+        logger.error(f"Daily broadcast failed: {e}")
+
+
 # --- Bot setup ---
 
 
@@ -2103,6 +2200,12 @@ async def post_init(application: Application):
             _periodic_sync_job,
             interval=SERVING_SYNC_INTERVAL_SECONDS,
             first=SERVING_SYNC_INTERVAL_SECONDS,
+        )
+        # Fixed daily broadcast at 08:00 Warsaw (decoupled from pipeline).
+        jq.run_daily(
+            _daily_broadcast_job,
+            time=datetime.time(hour=BROADCAST_HOUR, minute=BROADCAST_MINUTE, tzinfo=WARSAW_TZ),
+            name="daily_broadcast",
         )
         # Renewal reminders: nudge users whose subscription is expiring / in grace.
         jq.run_repeating(

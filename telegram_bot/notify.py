@@ -272,6 +272,12 @@ def broadcast(conn) -> int:
         ][:cap]
 
         if not to_send:
+            if listings:
+                send_message(
+                    chat_id,
+                    "📭 No new listings matching your filters today.\n"
+                    "We'll check again tomorrow! Adjust /filters if you'd like broader results.",
+                )
             continue
 
         # Build combined message(s) and send
@@ -287,6 +293,26 @@ def broadcast(conn) -> int:
         logger.info(f"chat {chat_id}: sent {len(sent_pairs)} listings in {len(chunks)} message(s)")
 
     return total_sent
+
+
+def run_daily_broadcast() -> int:
+    """Send the daily digest — called by the bot's 08:00 Warsaw scheduler.
+
+    Decoupled from pipeline timing, so users get a predictable daily digest
+    regardless of when the scrape/Databricks run finished. It queries the gold
+    snapshot from the Databricks SQL *warehouse* (a warehouse query is not
+    subject to the Free-Edition job-trigger throttle that affects run-now; a cold
+    warehouse only adds start-up latency). Returns the number of listings sent.
+    """
+    if not all([TELEGRAM_BOT_TOKEN, DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_WAREHOUSE_ID]):
+        logger.error("Daily broadcast skipped: missing Telegram/Databricks configuration")
+        return 0
+    conn = get_sql_connection()
+    try:
+        ensure_alerts_sent_table(conn)
+        return broadcast(conn)
+    finally:
+        conn.close()
 
 
 def main():

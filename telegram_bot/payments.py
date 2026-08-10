@@ -52,6 +52,8 @@ GRACE_DAYS = int(os.environ.get("SUBSCRIPTION_GRACE_DAYS", "3"))
 RENEWAL_REMIND_DAYS = int(os.environ.get("SUBSCRIPTION_REMIND_DAYS", "3"))
 # Don't remind the same user more often than this (seconds).
 _REMIND_COOLDOWN_SECONDS = int(os.environ.get("SUBSCRIPTION_REMIND_COOLDOWN", str(20 * 3600)))
+# Free trial duration for new users (days).
+TRIAL_DAYS = 1
 
 # Feature keys used for gating individual commands.
 FEATURE_FILTER_PUSH = "filter_push"
@@ -136,6 +138,14 @@ def _init(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trials (
+            chat_id      INTEGER PRIMARY KEY,
+            activated_at REAL    NOT NULL
+        )
+        """
+    )
     # Lightweight migrations for the lifecycle columns (older DBs won't have them).
     for table, col, decl in (
         ("subscriptions", "last_reminded_at", "REAL NOT NULL DEFAULT 0"),
@@ -187,6 +197,37 @@ def activate(chat_id: int, tier: str, *, days: int | None = None) -> float:
             return expires
         finally:
             conn.close()
+
+
+def activate_trial(chat_id: int) -> float | None:
+    """Grant a one-time free trial (Plus tier) to a new user.
+
+    Returns the subscription expiry epoch if the trial was activated, or None if
+    the user already used a trial or has/had any subscription.
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            # Check if the user ever had a trial.
+            row = conn.execute("SELECT 1 FROM trials WHERE chat_id=?", (chat_id,)).fetchone()
+            if row:
+                return None
+            # Check if the user already has (or ever had) a subscription.
+            row = conn.execute("SELECT 1 FROM subscriptions WHERE chat_id=?", (chat_id,)).fetchone()
+            if row:
+                return None
+            # Record the trial activation.
+            conn.execute(
+                "INSERT INTO trials (chat_id, activated_at) VALUES (?, ?)",
+                (chat_id, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    # Activate the Plus subscription for TRIAL_DAYS outside the inner lock
+    # (activate() acquires its own lock).
+    return activate(chat_id, "plus", days=TRIAL_DAYS)
 
 
 def record_payment(charge_id: str, chat_id: int, tier: str, stars: int) -> None:

@@ -2,11 +2,10 @@ name: Daily Scrape
 
 on:
   schedule:
-    # Run daily at 04:30 UTC (06:30 Warsaw / CEST, 05:30 CET).
-    # Deliberately off the top of the hour: Free Edition job-trigger throttling
-    # (FEATURE_DISABLED) correlates with peak :00 scheduling contention, so an
-    # off-peak minute reduces how often the trigger step gets throttled.
-    - cron: "30 4 * * *"
+    # Run at 03:00 UTC (05:00 Warsaw). This is deep off-peak for Databricks
+    # Free Edition (Americas nighttime), minimizing FEATURE_DISABLED throttle
+    # risk. Pipeline completes well before the fixed 08:00 Warsaw broadcast.
+    - cron: "0 3 * * *"
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -132,28 +131,10 @@ jobs:
             sleep 20
           done
 
-  # Telegram notifications (runs after the pipeline has completed)
-  notify:
-    runs-on: ubuntu-latest
-    needs: scrape-and-upload
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-      DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_WAREHOUSE_ID }}
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install requests databricks-sql-connector databricks-sdk
-
-      - name: Send Telegram notifications
-        run: python -m telegram_bot.notify
+  # NOTE: Telegram broadcast is now decoupled from this pipeline.
+  # The bot (running 24/7 on the VM) sends daily alerts at exactly 08:00 Warsaw,
+  # reading from whatever data was last synced. This eliminates timing jitter and
+  # means users always get their digest at a predictable time regardless of how
+  # long the pipeline takes or whether Databricks was throttled.
+  # The Databricks notebook 04_alert_telegram remains as a secondary idempotent
+  # path (deduped via telegram_alerts_sent table).

@@ -53,10 +53,11 @@ resources:
             notebook_path: ../notebooks/run_dbt_test.py
             source: WORKSPACE
 
-        - task_key: alert_telegram
-          description: "Send Telegram notifications for new matching listings"
-          depends_on:
-            - task_key: dbt_test
-          notebook_task:
-            notebook_path: ../notebooks/04_alert_telegram.py
-            source: WORKSPACE
+      # NOTE: Telegram alerting is intentionally NOT a pipeline task. The bot
+      # (running 24/7 on the GCP VM) owns broadcasting via a fixed 08:00
+      # Europe/Warsaw JobQueue job (telegram_bot.notify.run_daily_broadcast),
+      # decoupled from pipeline completion time. Having the pipeline also alert
+      # here would double-broadcast: users would get listings at pipeline-finish
+      # time and then a contradictory "no new listings today" at 08:00 (the
+      # per-(listing,chat) dedup makes the second run find nothing new).
+      # notebooks/04_alert_telegram.py is kept for manual/backfill use only.
