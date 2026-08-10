@@ -32,6 +32,8 @@ def serving(tmp_path, monkeypatch):
     )
     con.execute(
         "CREATE TABLE demand_by_technology AS SELECT * FROM (VALUES "
+        # Partial bootstrap week (global earliest) — must be dropped by tech_demand_trend.
+        "('Python','2026','29','2026-07-13','3','0','3'),"
         "('Python','2026','30','2026-07-20','30','25','5'),"
         "('Python','2026','31','2026-07-27','40','30','10'),"
         "('SQL','2026','31','2026-07-27','22','20','2')"
@@ -46,6 +48,8 @@ def serving(tmp_path, monkeypatch):
     )
     con.execute(
         "CREATE TABLE market_trends AS SELECT * FROM (VALUES "
+        # Partial bootstrap day (global earliest) — must be dropped by market_trend.
+        "('2026-07-31','30','7','2026','2','18000','2','18000'),"
         "('2026-08-01','31','8','2026','12','20000','60','19500'),"
         "('2026-08-02','31','8','2026','15','21000','70','20000')"
         ") AS t(full_date,week_of_year,month,year,new_listings,avg_salary_mid,"
@@ -143,13 +147,15 @@ def test_skills_for_tech(serving):
 def test_market_trend(serving):
     rows = serving.market_trend(weeks=8)
     assert len(rows) == 2
-    assert rows[0]["full_date"] == "2026-08-01"  # oldest first
+    assert rows[0]["full_date"] == "2026-08-01"  # oldest first, partial 07-31 dropped
+    assert all(r["full_date"] != "2026-07-31" for r in rows)  # partial bootstrap day gone
     assert rows[-1]["rolling_7d_listings"] == 70
 
 
 def test_tech_demand_trend(serving):
     rows = serving.tech_demand_trend("Python")
-    assert [r["listing_count"] for r in rows] == [30, 40]  # oldest first
+    assert [r["listing_count"] for r in rows] == [30, 40]  # oldest first, partial week dropped
+    assert rows[0]["week_start"] == "2026-07-20"  # 2026-07-13 bootstrap week excluded
     assert rows[-1]["wow_change"] == 10
 
 

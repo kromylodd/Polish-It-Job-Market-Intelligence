@@ -301,7 +301,7 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 
 ## Roadmap
 
-- Trend chart cleanup: drop the partial first day so week-over-week isn't inflated.
+- ~~Trend chart cleanup: drop the partial first day so week-over-week isn't inflated.~~ ✅ Done.
 - ~~Lakeview dashboard on the gold marts for a visual/BI companion to the bot.~~ ✅ Done — `dashboards/job_market_overview.lvdash.json`, deployed via the Asset Bundle (`resources/dashboards.yml`).
 - ~~All-seniorities gold mart so premium alerts cover senior/mid, not just junior.~~ ✅ Done.
 - ~~Real payment lifecycle: refunds, grace periods, renewal reminders.~~ ✅ Done.

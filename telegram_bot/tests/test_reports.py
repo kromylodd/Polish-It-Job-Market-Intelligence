@@ -20,6 +20,8 @@ def modules(tmp_path, monkeypatch):
     con = duckdb.connect(str(tmp_path / "serving.duckdb"))
     con.execute(
         "CREATE TABLE market_trends AS SELECT * FROM (VALUES "
+        # Partial bootstrap day (global earliest) — dropped by market_trend.
+        "('2026-07-25','30','7','2026','2','18000','2','18000'),"
         "('2026-08-01','31','8','2026','12','20000','60','19500'),"
         "('2026-08-08','32','8','2026','15','21000','80','20500')"
         ") AS t(full_date,week_of_year,month,year,new_listings,avg_salary_mid,"
@@ -35,6 +37,9 @@ def modules(tmp_path, monkeypatch):
     )
     con.execute(
         "CREATE TABLE demand_by_technology AS SELECT * FROM (VALUES "
+        # Partial bootstrap week (global earliest) — dropped by tech_demand_trend.
+        "('Python','2026','30','2026-07-25','3','0','3'),"
+        "('Python','2026','31','2026-08-01','30','25','5'),"
         "('Python','2026','32','2026-08-08','40','30','10'),"
         "('SQL','2026','32','2026-08-08','22','20','2')"
         ") AS t(technology_name,year,week_of_year,week_start,listing_count,prev_week_count,wow_change)"

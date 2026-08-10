@@ -436,10 +436,15 @@ def skills_for_tech(tech: str, limit: int = 8) -> dict | None:
 
 
 def _tech_total_listings(tech: str) -> int:
-    """Total distinct listings mentioning a tech (summed from the demand mart)."""
+    """Total distinct listings mentioning a tech (summed from the demand mart).
+
+    Excludes the first collection week (partial bootstrap) so the co-occurrence
+    denominator matches the trend series, which also drops it.
+    """
     rows = _query(
         "SELECT sum(CAST(listing_count AS INTEGER)) AS n "
-        "FROM demand_by_technology WHERE lower(technology_name)=lower(?)",
+        "FROM demand_by_technology WHERE lower(technology_name)=lower(?) "
+        "AND week_start > (SELECT min(week_start) FROM demand_by_technology)",
         [tech],
     )
     if rows and rows[0].get("n") is not None:
@@ -451,26 +456,38 @@ def market_trend(weeks: int = 8) -> list[dict]:
     """Recent daily market-trend rows (most recent ``weeks`` weeks), oldest first.
 
     Returns rows with full_date, new_listings, rolling_7d_listings,
-    rolling_7d_avg_salary — suitable for a chart or a text summary.
+    rolling_7d_avg_salary — suitable for a chart or a text summary. The earliest
+    day ever collected is dropped: the pipeline's first run captured only a
+    partial day, which otherwise shows as an artificially low leading bar and
+    inflates the next day's change. Once that bootstrap day ages out of the
+    window the filter is a no-op.
     """
     rows = _query(
         "SELECT full_date, "
         "CAST(new_listings AS INTEGER) AS new_listings, "
         "CAST(rolling_7d_listings AS INTEGER) AS rolling_7d_listings, "
         "CAST(rolling_7d_avg_salary AS DOUBLE) AS rolling_7d_avg_salary "
-        "FROM market_trends ORDER BY full_date DESC LIMIT ?",
+        "FROM market_trends "
+        "WHERE full_date > (SELECT min(full_date) FROM market_trends) "
+        "ORDER BY full_date DESC LIMIT ?",
         [weeks * 7],
     )
     return list(reversed(rows))
 
 
 def tech_demand_trend(tech: str, limit: int = 12) -> list[dict]:
-    """Weekly demand (listing_count + WoW change) for a tech, oldest first."""
+    """Weekly demand (listing_count + WoW change) for a tech, oldest first.
+
+    Drops the first collection week (the same partial-bootstrap artifact as
+    ``market_trend``): its ``wow_change`` compares against a missing/partial
+    prior week and reads as a spurious spike.
+    """
     rows = _query(
         "SELECT week_start, "
         "CAST(listing_count AS INTEGER) AS listing_count, "
         "CAST(wow_change AS INTEGER) AS wow_change "
         "FROM demand_by_technology WHERE lower(technology_name)=lower(?) "
+        "AND week_start > (SELECT min(week_start) FROM demand_by_technology) "
         "ORDER BY week_start DESC LIMIT ?",
         [tech, limit],
     )

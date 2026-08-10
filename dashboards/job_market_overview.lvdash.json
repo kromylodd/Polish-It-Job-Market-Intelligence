@@ -40,6 +40,7 @@
       "queryLines": [
         "SELECT full_date, rolling_7d_listings, rolling_7d_avg_salary\n",
         "FROM job_market.gold.mart_market_trends\n",
+        "WHERE full_date > (SELECT min(full_date) FROM job_market.gold.mart_market_trends)\n",
         "ORDER BY full_date"
       ]
     },
