@@ -9,4 +9,9 @@
   aggregate the monthly columns instead of the raw min/max. `/salary` now shows
   each contract basis as a trustworthy monthly figure (per-hour rates no longer
   contaminate the medians), so the "un-normalized B2B" caveat was dropped.
-- [ ] Paid subscription tier: allow paid users to see more than 20 listings per notification run (current `MAX_PER_USER` cap in `telegram_bot/notify.py`)
+- [x] Paid subscription tier: allow paid users to see more than 20 listings per
+  notification run. ✅ Done. Per-tier caps in `payments.py`
+  (`FREE_MAX_LISTINGS=20`, Plus 50, Pro 100, `listing_cap()`); `/latest` uses the
+  buyer's cap directly, and the daily broadcast honours it via a `max_listings`
+  field the bot stamps into the shared config store (so `notify.py` / the alert
+  notebook don't need access to `payments.db`).

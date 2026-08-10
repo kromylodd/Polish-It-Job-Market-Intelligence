@@ -122,11 +122,11 @@ Payments use **Telegram Stars** (`currency="XTR"`, empty provider token) — no 
 
 | Tier | Price | What you get |
 |---|---|---|
-| **Free** | — | Daily digest + all filters |
-| **Plus** | 250 ⭐ / 30 days | Saved-filter push, `/latest` on demand, `/salary`, `/trend` |
-| **Pro** | 600 ⭐ / 30 days | Everything in Plus + `/skills` co-occurrence, `/company` intel, `/export`, application tracker, weekly report |
+| **Free** | — | Daily digest + all filters (up to 20 listings/run) |
+| **Plus** | 250 ⭐ / 30 days | Saved-filter push, `/latest` on demand, `/salary`, `/trend`, up to 50 listings/run |
+| **Pro** | 600 ⭐ / 30 days | Everything in Plus + `/skills` co-occurrence, `/company` intel, `/export`, application tracker, weekly report, up to 100 listings/run |
 
-Feature gating respects a tier hierarchy (Pro ⊇ Plus), persisted in SQLite with expiry. The pricing is deliberately structured so **Pro needs only ~3–4 subscribers to match the net revenue of ~9 Plus subscribers** — selling fewer, more valuable subscriptions rather than racing to the bottom.
+Feature gating respects a tier hierarchy (Pro ⊇ Plus), persisted in SQLite with expiry. Paid tiers also raise the per-run listing cap (free 20 → Plus 50 → Pro 100); the bot stamps each user's cap into the shared config so the GitHub Actions / Databricks broadcast senders honour it without touching the subscription store. The pricing is deliberately structured so **Pro needs only ~3–4 subscribers to match the net revenue of ~9 Plus subscribers** — selling fewer, more valuable subscriptions rather than racing to the bottom.
 
 ## The Serving Layer: Why a Local DuckDB Cache
 

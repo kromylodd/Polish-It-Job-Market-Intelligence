@@ -365,7 +365,15 @@ if can_reach:
         if not matching:
             continue
 
-        to_send = matching[:MAX_PER_USER]
+        # Paid users get a larger batch: the bot stamps max_listings (from their
+        # subscription tier) into the shared config; free users use the default.
+        try:
+            cap = int(config.get("max_listings", MAX_PER_USER))
+            if cap <= 0:
+                cap = MAX_PER_USER
+        except (TypeError, ValueError):
+            cap = MAX_PER_USER
+        to_send = matching[:cap]
         chunks = build_combined_message(to_send)
         for chunk in chunks:
             send_message(chat_id, chunk)

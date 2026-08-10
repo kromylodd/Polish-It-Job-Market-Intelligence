@@ -86,7 +86,8 @@ TIERS: dict[str, dict] = {
         "days": 30,
         "rank": 1,
         "features": _PLUS_FEATURES,
-        "blurb": "Saved-filter push · /latest anytime · /salary · /trend",
+        "max_listings": 50,
+        "blurb": "Saved-filter push · /latest anytime · /salary · /trend · up to 50 listings/run",
     },
     "pro": {
         "name": "Pro",
@@ -94,12 +95,16 @@ TIERS: dict[str, dict] = {
         "days": 30,
         "rank": 2,
         "features": _PRO_FEATURES,
+        "max_listings": 100,
         "blurb": (
             "Everything in Plus · /skills co-occurrence · /company intel · "
-            "/export · application tracker · weekly report"
+            "/export · application tracker · weekly report · up to 100 listings/run"
         ),
     },
 }
+
+# Listings delivered per notification run / /latest for free (non-subscriber) users.
+FREE_MAX_LISTINGS = int(os.environ.get("FREE_MAX_LISTINGS", "20"))
 
 
 def _connect() -> sqlite3.Connection:
@@ -245,6 +250,19 @@ def has_feature(chat_id: int, feature: str) -> bool:
     if not sub:
         return False
     return feature in TIERS[sub["tier"]]["features"]
+
+
+def max_listings_for(tier: str | None) -> int:
+    """Listings-per-run cap for a tier (free default for None/unknown)."""
+    if tier and tier in TIERS:
+        return TIERS[tier].get("max_listings", FREE_MAX_LISTINGS)
+    return FREE_MAX_LISTINGS
+
+
+def listing_cap(chat_id: int) -> int:
+    """Listings-per-run cap for a user, based on their active/grace subscription."""
+    sub = get_subscription(chat_id)
+    return max_listings_for(sub["tier"] if sub else None)
 
 
 def tier_for_payload(payload: str) -> str | None:

@@ -39,7 +39,9 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessag
 
 ALERTS_SENT_TABLE = "job_market.gold.telegram_alerts_sent"
 
-# Max listings to send to a single user per run.
+# Max listings to send to a single user per run (free-tier default). Paid users
+# get a larger cap, published per-user as ``max_listings`` in the shared config
+# by the bot (which owns payments.db); we read it here without needing that DB.
 MAX_PER_USER = 20
 
 
@@ -232,6 +234,17 @@ def _build_combined_message(listings: list[dict]) -> list[str]:
     return chunks
 
 
+def _cap_for(config: dict) -> int:
+    """Per-user listings cap: the bot stamps ``max_listings`` (from the user's
+    subscription tier) into the published config; free users fall back to the
+    default. Guards against corrupt values."""
+    try:
+        cap = int(config.get("max_listings", MAX_PER_USER))
+        return cap if cap > 0 else MAX_PER_USER
+    except (TypeError, ValueError):
+        return MAX_PER_USER
+
+
 def broadcast(conn) -> int:
     """Send each user their matching, not-yet-sent listings as combined messages.
 
@@ -251,11 +264,12 @@ def broadcast(conn) -> int:
     total_sent = 0
     for chat_id, config in user_configs.items():
         matches = filter_listings(listings, config)
+        cap = _cap_for(config)
         to_send = [
             listing
             for listing in matches
             if (listing["listing_id"], str(chat_id)) not in already_sent
-        ][:MAX_PER_USER]
+        ][:cap]
 
         if not to_send:
             continue

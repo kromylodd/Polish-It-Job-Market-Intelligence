@@ -146,15 +146,38 @@ def _schedule_volume_publish():
 
 
 async def _volume_publish_worker():
-    """Upload the local config to the Volume, coalescing rapid successive edits."""
+    """Upload the local config to the Volume, coalescing rapid successive edits.
+
+    The published copy is enriched with each user's ``max_listings`` cap (derived
+    from their subscription tier) so the daily broadcast senders — which run in
+    GitHub Actions / Databricks and have no access to payments.db — can give paid
+    users a larger batch without querying the subscription store themselves.
+    """
     global _publish_dirty
     await asyncio.sleep(PUBLISH_DEBOUNCE_SECONDS)
     while _publish_dirty:
         _publish_dirty = False
         snapshot = config_store.load_local()
-        ok = await asyncio.to_thread(config_store.upload_to_volume, snapshot)
+        enriched = _enrich_with_caps(snapshot)
+        ok = await asyncio.to_thread(config_store.upload_to_volume, enriched)
         if not ok:
             logger.debug("Volume publish skipped/failed; local copy remains authoritative")
+
+
+def _enrich_with_caps(snapshot: dict) -> dict:
+    """Return a copy of the config store with each user's listings cap stamped in.
+
+    Local file stays clean (derived field is only added to the uploaded copy).
+    """
+    enriched = copy.deepcopy(snapshot)
+    for chat_id, cfg in enriched.items():
+        if not isinstance(cfg, dict):
+            continue
+        try:
+            cfg["max_listings"] = payments.listing_cap(int(chat_id))
+        except (ValueError, TypeError):
+            cfg["max_listings"] = payments.FREE_MAX_LISTINGS
+    return enriched
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -938,9 +961,10 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     config = load_config(update.effective_chat.id)
 
+    cap = payments.listing_cap(update.effective_chat.id)
     try:
         # Databricks / file I/O is blocking — keep it off the event loop.
-        listings = await asyncio.to_thread(_get_latest_listings, config)
+        listings = await asyncio.to_thread(_get_latest_listings, config, cap)
     except Exception as e:
         logger.error(f"/latest failed: {e}")
         await update.message.reply_text(
@@ -1196,7 +1220,7 @@ def _save_feedback(chat_id: int, text: str):
 # --- Data helpers ---
 
 
-def _get_latest_listings(config: dict) -> list[dict]:
+def _get_latest_listings(config: dict, limit: int = payments.FREE_MAX_LISTINGS) -> list[dict]:
     """Try Databricks, fall back to local data files."""
     databricks_host = os.environ.get("DATABRICKS_HOST", "")
     databricks_token = os.environ.get("DATABRICKS_TOKEN", "")
@@ -1204,11 +1228,11 @@ def _get_latest_listings(config: dict) -> list[dict]:
 
     if databricks_host and databricks_token and warehouse_id:
         try:
-            return _query_databricks_latest(config)
+            return _query_databricks_latest(config, limit)
         except Exception as e:
             logger.warning(f"Databricks failed, using local: {e}")
 
-    return _read_local_latest(config)
+    return _read_local_latest(config, limit)
 
 
 def _ondemand_sql_connect():
@@ -1236,7 +1260,7 @@ def _ondemand_sql_connect():
     )
 
 
-def _query_databricks_latest(config: dict) -> list[dict]:
+def _query_databricks_latest(config: dict, limit: int = payments.FREE_MAX_LISTINGS) -> list[dict]:
     """Query Databricks gold mart, apply filter logic in Python."""
     query = """
         SELECT listing_id, title, slug, company_name, seniority,
@@ -1245,7 +1269,7 @@ def _query_databricks_latest(config: dict) -> list[dict]:
                posted_date, technologies, cities
         FROM job_market.gold.mart_market_snapshot
         ORDER BY posted_date DESC
-        LIMIT 100
+        LIMIT 500
     """
 
     with _ondemand_sql_connect() as conn:
@@ -1258,10 +1282,10 @@ def _query_databricks_latest(config: dict) -> list[dict]:
             ]
 
     # Apply tolerance-based filter
-    return filter_listings(rows, config)[:20]
+    return filter_listings(rows, config)[:limit]
 
 
-def _read_local_latest(config: dict) -> list[dict]:
+def _read_local_latest(config: dict, limit: int = payments.FREE_MAX_LISTINGS) -> list[dict]:
     """Read most recent local data file and filter."""
     data_dir = Path(__file__).parent.parent / "data"
     if not data_dir.exists():
@@ -1275,7 +1299,7 @@ def _read_local_latest(config: dict) -> list[dict]:
         data = json.load(f)
 
     listings = data.get("listings", [])
-    return filter_listings(listings[:200], config)[:20]
+    return filter_listings(listings[:200], config)[:limit]
 
 
 def _get_stats() -> dict:
@@ -1788,6 +1812,8 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         sp.total_amount,
         sp.telegram_payment_charge_id,
     )
+    # Republish config so the broadcast senders pick up this user's new cap.
+    _schedule_volume_publish()
     exp = datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d")
     await update.message.reply_text(
         f"🎉 <b>{payments.TIERS[tier]['name']}</b> is active until {exp}!\n\n"
@@ -1830,6 +1856,8 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Telegram refund failed: {e}")
         return
     await asyncio.to_thread(payments.refund_payment, charge_id)
+    # Republish config so the broadcast senders drop this user back to the free cap.
+    _schedule_volume_publish()
     try:
         await context.bot.send_message(
             int(pay["chat_id"]),

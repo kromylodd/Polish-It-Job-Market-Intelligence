@@ -148,3 +148,17 @@ def test_active_subscription_fields(payments):
     sub = payments.get_subscription(1)
     assert sub["tier"] == "plus"
     assert sub["expires_at"] > time.time()
+
+
+def test_listing_cap_by_tier(payments):
+    # Free (no subscription) => the free default.
+    assert payments.listing_cap(1) == payments.FREE_MAX_LISTINGS
+    assert payments.max_listings_for(None) == payments.FREE_MAX_LISTINGS
+    # Paid tiers get their larger caps.
+    payments.activate(1, "plus")
+    assert payments.listing_cap(1) == payments.TIERS["plus"]["max_listings"]
+    payments.activate(2, "pro")
+    assert payments.listing_cap(2) == payments.TIERS["pro"]["max_listings"]
+    # Pro cap is at least Plus cap, both above free.
+    assert payments.TIERS["pro"]["max_listings"] >= payments.TIERS["plus"]["max_listings"]
+    assert payments.TIERS["plus"]["max_listings"] > payments.FREE_MAX_LISTINGS
