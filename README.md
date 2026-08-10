@@ -276,8 +276,11 @@ git clone https://github.com/kromylodd/Polish-It-Job-Market-Intelligence.git
 cd polish-it-job-market-intelligence
 pip install -r requirements-dev.txt
 databricks bundle validate
-databricks bundle deploy -t prod
+databricks bundle deploy -t prod --var="warehouse_id=$DATABRICKS_WAREHOUSE_ID"
 ```
+
+> The `warehouse_id` bundle variable feeds the Lakeview dashboard — it's the same
+> SQL warehouse ID stored in your `DATABRICKS_WAREHOUSE_ID` secret/env var.
 
 ### Bot (local)
 ```bash
