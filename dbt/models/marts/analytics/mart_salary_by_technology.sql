@@ -8,8 +8,10 @@
 with fact_with_tech as (
     select
         f.listing_id,
-        f.salary_min,
-        f.salary_max,
+        -- Period-normalized monthly figures so hourly B2B rates don't get
+        -- blended with monthly UoP pay (see fact_job_listings normalization).
+        f.salary_min_monthly as salary_min,
+        f.salary_max_monthly as salary_max,
         f.currency,
         f.is_gross,
         ds.level as seniority,
@@ -22,9 +24,9 @@ with fact_with_tech as (
         on ds.seniority_key = f.seniority_key
     left join {{ ref('dim_employment_type') }} det
         on det.employment_type_key = f.employment_type_key
-    where f.salary_min is not null
-      and f.salary_min > 0
-      and f.salary_max >= f.salary_min
+    where f.salary_min_monthly is not null
+      and f.salary_min_monthly > 0
+      and f.salary_max_monthly >= f.salary_min_monthly
 )
 
 select

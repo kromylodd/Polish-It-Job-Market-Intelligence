@@ -731,26 +731,19 @@ async def _salary_insights(update: Update, args: list[str]):
     lines = [f"💰 <b>Salary — {tech}</b>" + (f" · {seniority}" if seniority else "")]
     lines.append(f"<i>Based on {stats['listing_count']} listings</i>\n")
 
-    # One block per contract basis + currency (permanent/UoP shown first). We
-    # deliberately DON'T blend UoP and B2B: their pay is quoted on different
-    # bases (monthly vs per-hour), so a single median/range would be misleading.
+    # One block per contract basis + currency (largest group first). Salary is
+    # period-normalized to monthly upstream, so B2B and UoP are comparable; we
+    # still show them separately because they're genuinely different comp
+    # (B2B gross vs UoP), not because of a units mismatch.
     for g in stats["groups"]:
         cur = g["currency"]
         head = f"<b>{g['label']}</b> · {cur} · {g['count']} listings"
-        if not g["normalized"]:
-            head += " ⚠️"
         lines.append(head)
         if g.get("median") is not None:
-            lines.append(f"  📊 Median: <b>{g['median']} {cur}</b>")
+            lines.append(f"  📊 Median: <b>{g['median']} {cur}/mo</b>")
         if g.get("p25") is not None and g.get("p75") is not None:
-            lines.append(f"  📉 Typical (25–75%): {g['p25']} – {g['p75']} {cur}")
+            lines.append(f"  📉 Typical (25–75%): {g['p25']} – {g['p75']} {cur}/mo")
         lines.append("")
-
-    if any(not g["normalized"] for g in stats["groups"]):
-        lines.append(
-            "⚠️ <i>B2B/mandate rates are quoted per hour or per month and aren't "
-            "period-normalized yet — treat those figures as indicative.</i>"
-        )
 
     # Per-seniority breakdown (permanent/UoP median), only when not filtered.
     if not seniority:

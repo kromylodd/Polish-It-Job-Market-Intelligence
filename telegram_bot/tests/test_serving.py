@@ -19,7 +19,7 @@ def serving(tmp_path, monkeypatch):
     # All columns VARCHAR to mirror how sync_marts stores them.
     con.execute(
         "CREATE TABLE salary_by_technology AS SELECT * FROM (VALUES "
-        # B2B rows (period NOT normalized upstream — hourly/monthly mixed).
+        # B2B rows (period-normalized to monthly in the mart upstream).
         "('Python','junior','b2b','PLN','10','8000','12000','10000','9500','8000','11000','6000','15000'),"
         "('Python','senior','b2b','PLN','20','18000','26000','22000','21000','19000','24000','15000','30000'),"
         # Permanent/UoP rows (monthly). Senior row carries a 600k outlier max to
@@ -88,7 +88,9 @@ def test_salary_for_tech(serving):
     assert perm["p75"] == 27667  # (16000*15 + 33500*30)/45
 
     b2b = groups["b2b"]
-    assert b2b["normalized"] is False
+    # Salary is period-normalized to monthly upstream, so every basis is
+    # flagged normalized (B2B is monthly-comparable, just different comp).
+    assert b2b["normalized"] is True
     assert b2b["count"] == 30  # 10 + 20
     assert b2b["median"] == 17167  # (9500*10 + 21000*20)/30
 

@@ -297,12 +297,13 @@ def salary_for_tech(tech: str, seniority: str | None = None) -> dict | None:
     """Salary stats for a technology, split by contract basis + currency.
 
     Reads the ``salary_by_technology`` mart (granular by technology, seniority,
-    employment_type, currency). Rather than blend everything into one min/max
-    range — which mixes monthly UoP pay with per-hour B2B rates and yields
-    garbage — we group by (contract basis, currency) and report the P25-P75
-    interquartile band the mart already computes, weighted by listing_count.
-    Permanent/UoP groups are flagged ``normalized``; B2B/mandate are not (their
-    period isn't normalized yet — see TODO). Returns None if no data.
+    employment_type, currency). Salary is period-normalized to a monthly basis
+    upstream (fact_job_listings converts per-hour/day/year quotes to monthly),
+    so B2B and UoP figures are directly comparable. We still group by (contract
+    basis, currency) — B2B (gross) and permanent/UoP pay are genuinely
+    different comp, so blending their medians would mislead — and report the
+    P25-P75 interquartile band the mart computes, weighted by listing_count.
+    Returns None if no data.
     """
     where = ["lower(technology_name) = lower(?)"]
     params: list = [tech]
@@ -361,11 +362,15 @@ def salary_for_tech(tech: str, seniority: str | None = None) -> dict | None:
                 "median": round(g["med_w"] / g["med_n"]) if g["med_n"] else None,
                 "p25": round(g["p25_w"] / g["p25_n"]) if g["p25_n"] else None,
                 "p75": round(g["p75_w"] / g["p75_n"]) if g["p75_n"] else None,
-                "normalized": basis == "permanent",
+                # All bases are period-normalized to a monthly basis upstream
+                # (fact_job_listings converts per-hour/day/year quotes to
+                # monthly before the marts aggregate), so every group is a
+                # comparable monthly figure.
+                "normalized": True,
             }
         )
-    # Trustworthy (monthly/permanent) groups first, then by listing count desc.
-    groups.sort(key=lambda x: (not x["normalized"], -x["count"]))
+    # Order by listing count desc (all groups are monthly-normalized now).
+    groups.sort(key=lambda x: -x["count"])
 
     return {
         "technology": tech,
@@ -378,9 +383,11 @@ def salary_for_tech(tech: str, seniority: str | None = None) -> dict | None:
 def salary_by_seniority(tech: str) -> list[dict]:
     """Per-seniority median for the permanent/UoP PLN basis, sorted by rank.
 
-    Restricted to monthly-quoted permanent contracts (PLN) so the breakdown is
-    comparable across seniorities — B2B hourly rates would distort it (see the
-    salary-period-normalization TODO). Each row: ``seniority``, ``n``, ``median``.
+    Restricted to permanent (UoP) PLN contracts as a single, consistent
+    reference ladder — UoP monthly pay is the figure most job seekers compare
+    against. (Salary is period-normalized upstream, so B2B could be included
+    too, but UoP is kept as the canonical apples-to-apples baseline.) Each row:
+    ``seniority``, ``n``, ``median``.
     """
     rows = _query(
         "SELECT seniority, "

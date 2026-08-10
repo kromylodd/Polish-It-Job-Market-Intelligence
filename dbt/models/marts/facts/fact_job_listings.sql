@@ -25,7 +25,25 @@ listings_exploded as (
         sv.col.salary_min,
         sv.col.salary_max,
         sv.col.currency,
-        sv.col.is_gross
+        sv.col.is_gross,
+        sv.col.unit as pay_unit,
+        -- Monthly-normalization factor. justjoin.it quotes B2B/mandate pay per
+        -- hour (or, rarely, per day/week/year) in the same salary field as
+        -- monthly permanent (UoP) pay, carrying the period only in `unit`.
+        -- Convert everything to a monthly basis so the gold marts aggregate
+        -- comparable figures. ~168 working hours / ~21 working days per month.
+        case lower(coalesce(sv.col.unit, 'month'))
+            when 'hour' then 168.0
+            when 'hourly' then 168.0
+            when 'day' then 21.0
+            when 'daily' then 21.0
+            when 'week' then 4.33
+            when 'weekly' then 4.33
+            when 'year' then 1.0 / 12.0
+            when 'annually' then 1.0 / 12.0
+            when 'annum' then 1.0 / 12.0
+            else 1.0
+        end as pay_factor
     from listings l
     lateral view explode(l.salary_variants) sv
 ),
@@ -45,6 +63,12 @@ final as (
         dd_collected.date_key as date_collected_key,
         le.salary_min,
         le.salary_max,
+        le.pay_unit,
+        -- Period-normalized monthly salary. The gold marts aggregate these
+        -- (not the raw min/max) so hourly B2B rates no longer contaminate
+        -- monthly medians. Raw salary_min/max + pay_unit are kept for lineage.
+        round(le.salary_min * le.pay_factor, 0) as salary_min_monthly,
+        round(le.salary_max * le.pay_factor, 0) as salary_max_monthly,
         le.currency,
         le.is_gross,
         'active' as listing_status

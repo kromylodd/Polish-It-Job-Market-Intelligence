@@ -9,8 +9,10 @@ with city_listings as (
     select
         bc.city_name,
         f.listing_id,
-        f.salary_min,
-        f.salary_max,
+        -- monthly-normalized (see fact_job_listings) so per-hour B2B rates
+        -- don't drag city averages down
+        f.salary_min_monthly as salary_min,
+        f.salary_max_monthly as salary_max,
         f.currency
     from {{ ref('fact_job_listings') }} f
     inner join {{ ref('bridge_listing_city') }} bc

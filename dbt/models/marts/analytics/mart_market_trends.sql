@@ -12,11 +12,13 @@ with daily_stats as (
         dd.month,
         dd.year,
         count(distinct f.listing_id) as new_listings,
-        round(avg((f.salary_min + f.salary_max) / 2), 0) as avg_salary_mid
+        -- monthly-normalized (see fact_job_listings) so the salary trend line
+        -- isn't distorted by per-hour B2B rates mixed into the average
+        round(avg((f.salary_min_monthly + f.salary_max_monthly) / 2), 0) as avg_salary_mid
     from {{ ref('fact_job_listings') }} f
     inner join {{ ref('dim_date') }} dd
         on dd.date_key = f.date_posted_key
-    where f.salary_min is not null and f.salary_min > 0
+    where f.salary_min_monthly is not null and f.salary_min_monthly > 0
     group by dd.full_date, dd.week_of_year, dd.month, dd.year
 )
 
