@@ -193,7 +193,10 @@ polish-it-job-market-intelligence/
 ├── databricks.yml                 # Asset Bundle root config
 ├── resources/
 │   ├── jobs.yml                    # Databricks Workflow: bronze→silver→dbt→test→alert
+│   ├── dashboards.yml              # Lakeview dashboard resource (BI companion)
 │   └── volumes.yml                 # Unity Catalog Volume definition
+├── dashboards/
+│   └── job_market_overview.lvdash.json  # Lakeview dashboard over the gold marts
 ├── scraper/
 │   ├── scraper.py                  # justjoin.it JSON API, cursor pagination, retries
 │   ├── parser.py                   # typed field extraction + normalization
@@ -298,7 +301,11 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 
 ## Roadmap
 
-- Lakeview dashboard on the gold marts for a visual/BI companion to the bot.
+- Trend chart cleanup: drop the partial first day so week-over-week isn't inflated.
+- ~~Lakeview dashboard on the gold marts for a visual/BI companion to the bot.~~ ✅ Done — `dashboards/job_market_overview.lvdash.json`, deployed via the Asset Bundle (`resources/dashboards.yml`).
+- ~~All-seniorities gold mart so premium alerts cover senior/mid, not just junior.~~ ✅ Done.
+- ~~Real payment lifecycle: refunds, grace periods, renewal reminders.~~ ✅ Done.
+- ~~Lower the scrape delay now that 429 `Retry-After` handling exists.~~ ✅ Done (0.5s).
 - ~~Move the bot to a free-tier cloud VM for true 24/7 independence from a laptop.~~ ✅ Done — GCP `e2-micro` in `us-west1-b`.
 
 ## Scraping Ethics

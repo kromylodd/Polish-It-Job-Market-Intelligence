@@ -71,6 +71,14 @@ CREATE VOLUME IF NOT EXISTS job_market.bronze.raw_listings;
 databricks bundle deploy -t dev
 ```
 
+To also deploy the Lakeview dashboard (`resources/dashboards.yml`), supply the
+SQL warehouse that backs its queries (not hardcoded — Free-Edition-specific):
+
+```bash
+databricks bundle deploy -t prod --var="warehouse_id=<your_warehouse_id>"
+# or: export DATABRICKS_BUNDLE_VAR_warehouse_id=<your_warehouse_id>
+```
+
 ### 3. Verify
 
 ```bash
