@@ -251,7 +251,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_command(update.effective_chat.id, "filters")
-    config = load_config(update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    if args and args[0].lower() == "clear":
+        config = copy.deepcopy(DEFAULT_USER_CONFIG)
+        save_config(chat_id, config)
+        await update.message.reply_text("🗑️ All filters reset to defaults.")
+        return
+    config = load_config(chat_id)
     await _send_filters_menu(update.message, config)
 
 
