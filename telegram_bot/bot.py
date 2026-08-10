@@ -1726,7 +1726,13 @@ async def _show_subscribe_menu(context, chat_id: int):
     lines = ["💎 <b>Premium tiers</b>\n"]
     if sub:
         exp = datetime.datetime.fromtimestamp(sub["expires_at"]).strftime("%Y-%m-%d")
-        lines.append(f"✅ Active: <b>{payments.TIERS[sub['tier']]['name']}</b> until {exp}\n")
+        if sub.get("in_grace"):
+            lines.append(
+                f"⏳ <b>{payments.TIERS[sub['tier']]['name']}</b> expired {exp} — "
+                f"in grace period, renew to keep access\n"
+            )
+        else:
+            lines.append(f"✅ Active: <b>{payments.TIERS[sub['tier']]['name']}</b> until {exp}\n")
     lines.append("<b>Free</b> — daily digest + all filters (no cost)\n")
     for t in payments.TIERS.values():
         lines.append(f"<b>{t['name']} — {t['stars']} ⭐ / 30 days</b>\n{t['blurb']}\n")
@@ -1775,6 +1781,13 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     chat_id = update.effective_chat.id
     payments.record_payment(sp.telegram_payment_charge_id, chat_id, tier, sp.total_amount)
     expires = payments.activate(chat_id, tier)
+    logger.info(
+        "Payment ok: chat=%s tier=%s stars=%s charge_id=%s",
+        chat_id,
+        tier,
+        sp.total_amount,
+        sp.telegram_payment_charge_id,
+    )
     exp = datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d")
     await update.message.reply_text(
         f"🎉 <b>{payments.TIERS[tier]['name']}</b> is active until {exp}!\n\n"
@@ -1784,6 +1797,50 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
 
 
 # --- Admin: refresh the serving cache ---
+
+
+async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: refund a Telegram Stars charge and revoke the subscription.
+
+    Usage: /refund <telegram_payment_charge_id>. The charge id is logged on the
+    successful_payment event and shown in the payments table.
+    """
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    log_command(update.effective_chat.id, "refund")
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("Usage: /refund <charge_id>")
+        return
+    charge_id = args[0].strip()
+    pay = await asyncio.to_thread(payments.get_payment, charge_id)
+    if not pay:
+        await update.message.reply_text(f"No payment found for charge {charge_id}.")
+        return
+    if pay.get("refunded_at"):
+        await update.message.reply_text("That charge was already refunded.")
+        return
+    # Issue the actual Stars refund via Telegram, then record it locally.
+    try:
+        await context.bot.refund_star_payment(
+            user_id=int(pay["chat_id"]), telegram_payment_charge_id=charge_id
+        )
+    except Exception as e:
+        logger.warning("refund_star_payment failed for %s: %s", charge_id, e)
+        await update.message.reply_text(f"Telegram refund failed: {e}")
+        return
+    await asyncio.to_thread(payments.refund_payment, charge_id)
+    try:
+        await context.bot.send_message(
+            int(pay["chat_id"]),
+            "↩️ Your subscription was refunded. Premium access has ended — "
+            "you can re-subscribe anytime with /subscribe.",
+        )
+    except Exception:
+        pass
+    await update.message.reply_text(
+        f"✅ Refunded {pay['stars']} ⭐ to chat {pay['chat_id']} and revoked {pay['tier']}."
+    )
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2012,6 +2069,12 @@ async def post_init(application: Application):
             interval=SERVING_SYNC_INTERVAL_SECONDS,
             first=SERVING_SYNC_INTERVAL_SECONDS,
         )
+        # Renewal reminders: nudge users whose subscription is expiring / in grace.
+        jq.run_repeating(
+            _renewal_reminder_job,
+            interval=RENEWAL_CHECK_INTERVAL_SECONDS,
+            first=300,
+        )
     else:
         logger.warning(
             "JobQueue unavailable — serving cache won't auto-refresh. "
@@ -2041,6 +2104,40 @@ async def _periodic_sync_job(context: ContextTypes.DEFAULT_TYPE):
         logger.info("Periodic mart sync: %s", synced or "nothing synced")
     except Exception as e:
         logger.warning("Periodic mart sync failed: %s", e)
+
+
+# How often to check for subscriptions needing a renewal nudge.
+RENEWAL_CHECK_INTERVAL_SECONDS = int(
+    os.environ.get("RENEWAL_CHECK_INTERVAL_SECONDS", str(6 * 3600))
+)
+
+
+async def _renewal_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """Nudge users whose subscription is expiring soon or in its grace window."""
+    try:
+        due = await asyncio.to_thread(payments.due_for_reminder)
+    except Exception as e:
+        logger.warning("Renewal reminder scan failed: %s", e)
+        return
+    for sub in due:
+        tier_name = payments.TIERS.get(sub["tier"], {}).get("name", sub["tier"])
+        exp = datetime.datetime.fromtimestamp(sub["expires_at"]).strftime("%Y-%m-%d")
+        if sub["status"] == "grace":
+            text = (
+                f"⏳ Your <b>{tier_name}</b> subscription expired on {exp} and is in a "
+                f"{payments.GRACE_DAYS}-day grace period. Renew with /subscribe to keep "
+                "premium access without interruption."
+            )
+        else:
+            text = (
+                f"🔔 Your <b>{tier_name}</b> subscription expires on {exp}. "
+                "Renew with /subscribe to keep your premium features."
+            )
+        try:
+            await context.bot.send_message(int(sub["chat_id"]), text, parse_mode="HTML")
+            await asyncio.to_thread(payments.mark_reminded, sub["chat_id"])
+        except Exception as e:
+            logger.warning("Failed to send renewal reminder to %s: %s", sub["chat_id"], e)
 
 
 def main():
@@ -2093,6 +2190,7 @@ def main():
 
     # Admin
     app.add_handler(CommandHandler("refresh", cmd_refresh))
+    app.add_handler(CommandHandler("refund", cmd_refund))
 
     # Patterned callback routers MUST be registered before the catch-all filters
     # handler so tracker/subscribe/premium taps aren't swallowed by _callback_filters.

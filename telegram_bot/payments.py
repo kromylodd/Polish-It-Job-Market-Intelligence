@@ -16,6 +16,12 @@ Tiers (monthly):
 
 Pro is a superset of Plus (feature checks respect the hierarchy). A price of N
 Stars is passed to Telegram as an integer amount of N (XTR has 0 decimal places).
+
+Lifecycle: purchases don't auto-renew, so after expiry there's a short grace
+window (``GRACE_DAYS``) during which access continues while the user is nudged
+to renew; a background job sends renewal reminders (``due_for_reminder`` /
+``mark_reminded``), and ``refund_payment`` records a Stars refund and revokes
+access (the actual ``refundStarPayment`` API call is made in bot.py).
 """
 
 from __future__ import annotations
@@ -37,6 +43,15 @@ DB_PATH = Path(
 )
 
 _lock = threading.Lock()
+
+# --- Lifecycle tunables -----------------------------------------------------
+# Grace period after expiry during which access continues while the user is
+# nudged to renew (Stars purchases don't auto-renew, so this softens the cliff).
+GRACE_DAYS = int(os.environ.get("SUBSCRIPTION_GRACE_DAYS", "3"))
+# Start sending renewal reminders this many days before expiry.
+RENEWAL_REMIND_DAYS = int(os.environ.get("SUBSCRIPTION_REMIND_DAYS", "3"))
+# Don't remind the same user more often than this (seconds).
+_REMIND_COOLDOWN_SECONDS = int(os.environ.get("SUBSCRIPTION_REMIND_COOLDOWN", str(20 * 3600)))
 
 # Feature keys used for gating individual commands.
 FEATURE_FILTER_PUSH = "filter_push"
@@ -116,7 +131,25 @@ def _init(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # Lightweight migrations for the lifecycle columns (older DBs won't have them).
+    for table, col, decl in (
+        ("subscriptions", "last_reminded_at", "REAL NOT NULL DEFAULT 0"),
+        ("payments", "refunded_at", "REAL"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass  # column already exists — expected on the happy path
     conn.commit()
+
+
+def _status(expires_at: float, now: float) -> str | None:
+    """Lifecycle status for an expiry: 'active', 'grace', or None (fully expired)."""
+    if now < expires_at:
+        return "active"
+    if now < expires_at + GRACE_DAYS * 86400:
+        return "grace"
+    return None
 
 
 def activate(chat_id: int, tier: str, *, days: int | None = None) -> float:
@@ -168,7 +201,12 @@ def record_payment(charge_id: str, chat_id: int, tier: str, stars: int) -> None:
 
 
 def get_subscription(chat_id: int) -> dict | None:
-    """Return the active subscription {tier, expires_at} or None if none/expired."""
+    """Return the active/grace subscription or None if none/fully-expired.
+
+    The result includes a lifecycle ``status`` ('active' or 'grace') and an
+    ``in_grace`` flag. Access continues through the grace window (see
+    ``GRACE_DAYS``); only once past grace is the subscription considered gone.
+    """
     with _lock:
         conn = _connect()
         try:
@@ -180,9 +218,15 @@ def get_subscription(chat_id: int) -> dict | None:
             conn.close()
     if not row:
         return None
-    if row["expires_at"] < time.time():
+    status = _status(row["expires_at"], time.time())
+    if status is None:
         return None
-    return {"tier": row["tier"], "expires_at": row["expires_at"]}
+    return {
+        "tier": row["tier"],
+        "expires_at": row["expires_at"],
+        "status": status,
+        "in_grace": status == "grace",
+    }
 
 
 def is_subscribed(chat_id: int, tier: str | None = None) -> bool:
@@ -214,3 +258,109 @@ def tier_for_payload(payload: str) -> str | None:
 def make_payload(tier: str, chat_id: int) -> str:
     """Build the invoice payload encoding the tier + buyer."""
     return f"sub:{tier}:{chat_id}"
+
+
+# --- Refunds ---------------------------------------------------------------
+
+
+def get_payment(charge_id: str) -> dict | None:
+    """Return a payment record by Telegram charge id, or None if unknown."""
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            row = conn.execute(
+                "SELECT charge_id, chat_id, tier, stars, paid_at, refunded_at "
+                "FROM payments WHERE charge_id=?",
+                (charge_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def refund_payment(charge_id: str) -> dict | None:
+    """Mark a charge refunded and revoke the buyer's subscription.
+
+    Returns the payment record (so the caller can issue the actual Telegram
+    ``refundStarPayment`` API call), or None if the charge is unknown or was
+    already refunded. Refunding revokes access immediately (simple, no
+    proration — a full refund ends the subscription).
+    """
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            row = conn.execute(
+                "SELECT charge_id, chat_id, tier, stars, paid_at, refunded_at "
+                "FROM payments WHERE charge_id=?",
+                (charge_id,),
+            ).fetchone()
+            if not row or row["refunded_at"] is not None:
+                return None
+            conn.execute("UPDATE payments SET refunded_at=? WHERE charge_id=?", (now, charge_id))
+            # Revoke access for the buyer (full refund ends the subscription).
+            conn.execute("DELETE FROM subscriptions WHERE chat_id=?", (row["chat_id"],))
+            conn.commit()
+            return dict(row)
+        finally:
+            conn.close()
+
+
+# --- Renewal reminders -----------------------------------------------------
+
+
+def due_for_reminder(now: float | None = None) -> list[dict]:
+    """Subscriptions that should get a renewal nudge right now.
+
+    A subscription is due when it's within ``RENEWAL_REMIND_DAYS`` of expiry (or
+    already in the grace window), isn't fully expired, and hasn't been reminded
+    within the cooldown. Each row: ``chat_id``, ``tier``, ``expires_at``,
+    ``status`` ('active' near expiry, or 'grace').
+    """
+    now = time.time() if now is None else now
+    remind_from = RENEWAL_REMIND_DAYS * 86400
+    grace_end_offset = GRACE_DAYS * 86400
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            rows = conn.execute(
+                "SELECT chat_id, tier, expires_at FROM subscriptions "
+                "WHERE (expires_at - ?) <= ? "  # within the pre-expiry reminder window
+                "  AND (expires_at + ?) > ? "  # not fully past grace
+                "  AND (last_reminded_at IS NULL OR (? - last_reminded_at) > ?)",
+                (remind_from, now, grace_end_offset, now, now, _REMIND_COOLDOWN_SECONDS),
+            ).fetchall()
+        finally:
+            conn.close()
+    due = []
+    for r in rows:
+        status = _status(r["expires_at"], now)
+        if status is None:
+            continue
+        due.append(
+            {
+                "chat_id": r["chat_id"],
+                "tier": r["tier"],
+                "expires_at": r["expires_at"],
+                "status": status,
+            }
+        )
+    return due
+
+
+def mark_reminded(chat_id: int, ts: float | None = None) -> None:
+    """Record that a renewal reminder was sent to ``chat_id`` (cooldown anchor)."""
+    ts = time.time() if ts is None else ts
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            conn.execute(
+                "UPDATE subscriptions SET last_reminded_at=? WHERE chat_id=?", (ts, chat_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()

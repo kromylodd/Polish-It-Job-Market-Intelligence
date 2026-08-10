@@ -39,10 +39,70 @@ def test_activate_pro_superset(payments):
 
 
 def test_expiry(payments):
-    # Activate with a negative duration => already expired.
-    payments.activate(1, "pro", days=-1)
+    # Fully expired: past the grace window => no subscription at all.
+    payments.activate(1, "pro", days=-(payments.GRACE_DAYS + 1))
     assert payments.get_subscription(1) is None
     assert payments.is_subscribed(1) is False
+
+
+def test_grace_period_keeps_access(payments):
+    # Expired 1 day ago but within the grace window: access continues, flagged.
+    payments.activate(1, "pro", days=-1)
+    sub = payments.get_subscription(1)
+    assert sub is not None
+    assert sub["status"] == "grace"
+    assert sub["in_grace"] is True
+    assert payments.is_subscribed(1) is True
+    assert payments.has_feature(1, payments.FEATURE_SKILLS) is True
+
+
+def test_active_not_in_grace(payments):
+    payments.activate(1, "plus", days=30)
+    sub = payments.get_subscription(1)
+    assert sub["status"] == "active"
+    assert sub["in_grace"] is False
+
+
+def test_refund_revokes_and_is_idempotent(payments):
+    payments.record_payment("charge_r", 7, "pro", 600)
+    payments.activate(7, "pro")
+    assert payments.is_subscribed(7) is True
+
+    rec = payments.refund_payment("charge_r")
+    assert rec is not None and rec["chat_id"] == 7
+    # Access revoked immediately.
+    assert payments.get_subscription(7) is None
+    assert payments.is_subscribed(7) is False
+    # Second refund is a no-op (already refunded).
+    assert payments.refund_payment("charge_r") is None
+    # Unknown charge => None.
+    assert payments.refund_payment("nope") is None
+
+
+def test_due_for_reminder(payments):
+    now = time.time()
+    # Expiring within the reminder window.
+    payments.activate(1, "plus", days=1)
+    # Far from expiry — should NOT be due.
+    payments.activate(2, "pro", days=30)
+    # In grace — should be due.
+    payments.activate(3, "plus", days=-1)
+    # Fully expired — should NOT be due.
+    payments.activate(4, "pro", days=-(payments.GRACE_DAYS + 5))
+
+    due_ids = {d["chat_id"] for d in payments.due_for_reminder(now)}
+    assert 1 in due_ids
+    assert 3 in due_ids
+    assert 2 not in due_ids
+    assert 4 not in due_ids
+
+
+def test_reminder_cooldown(payments):
+    payments.activate(1, "plus", days=1)
+    assert any(d["chat_id"] == 1 for d in payments.due_for_reminder())
+    payments.mark_reminded(1)
+    # Just reminded — cooldown suppresses another nudge.
+    assert not any(d["chat_id"] == 1 for d in payments.due_for_reminder())
 
 
 def test_extend_stacks(payments):

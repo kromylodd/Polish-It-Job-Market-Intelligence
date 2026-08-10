@@ -118,7 +118,7 @@ The `/premium` menu mirrors the free `/filters` menu: an inline keyboard where k
 
 ## Monetization (Telegram Stars)
 
-Payments use **Telegram Stars** (`currency="XTR"`, empty provider token) — no Stripe, no third-party processor, checkout handled inside Telegram. The full flow is wired: `send_invoice` → `PreCheckoutQuery` approval → `successful_payment` → subscription activation, with idempotent charge logging.
+Payments use **Telegram Stars** (`currency="XTR"`, empty provider token) — no Stripe, no third-party processor, checkout handled inside Telegram. The full flow is wired: `send_invoice` → `PreCheckoutQuery` approval → `successful_payment` → subscription activation, with idempotent charge logging. The subscription **lifecycle** is handled too: a post-expiry **grace period** keeps access alive while a background job sends **renewal reminders**, and an admin `/refund <charge_id>` issues a Telegram Stars refund (`refundStarPayment`) and revokes access.
 
 | Tier | Price | What you get |
 |---|---|---|
@@ -293,12 +293,11 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 - **No keyless (OIDC/WIF) CI auth.** Free Edition lacks the account-level API access needed for workload identity federation (the pattern used in project #1), so CI/CD uses a PAT in a GitHub secret. Documented trade-off, not an oversight.
 - **Outbound networking from Databricks serverless is restricted.** Scraping and the interactive bot run outside Databricks (GitHub Actions / a systemd host), not inside serverless compute.
 - **~10k listing cap per scrape** from justjoin.it's API pagination — a representative daily snapshot, not a full census, for the very largest result sets.
-- **Payments are wired but lightly exercised.** The full Stars checkout flow is implemented and unit-tested, but real-world volume is minimal — it's a functioning MVP monetization path, not a battle-tested billing system (no refund UI, no proration beyond simple stacking).
+- **Payments are wired but lightly exercised.** The full Stars checkout flow is implemented and unit-tested — including a subscription lifecycle (post-expiry grace period, background renewal reminders, and admin-issued Stars refunds that revoke access) — but real-world volume is minimal, so it's a functioning MVP monetization path rather than a battle-tested billing system (no self-serve refund UI, no proration beyond simple stacking).
 - **Bot hosting is a single node.** systemd on one host means no HA; if the host is down, alerts pause. Fine for the current scale; a managed always-on VM is the documented upgrade.
 
 ## Roadmap
 
-- Real payment lifecycle: refunds, grace periods, renewal reminders.
 - Lakeview dashboard on the gold marts for a visual/BI companion to the bot.
 - Lower the scrape delay now that 429 `Retry-After` handling exists (roughly halves runtime).
 - ~~Move the bot to a free-tier cloud VM for true 24/7 independence from a laptop.~~ ✅ Done — GCP `e2-micro` in `us-west1-b`.
