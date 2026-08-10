@@ -2,8 +2,11 @@ name: Daily Scrape
 
 on:
   schedule:
-    # Run daily at 06:00 UTC (08:00 Warsaw time)
-    - cron: "0 6 * * *"
+    # Run daily at 04:30 UTC (06:30 Warsaw / CEST, 05:30 CET).
+    # Deliberately off the top of the hour: Free Edition job-trigger throttling
+    # (FEATURE_DISABLED) correlates with peak :00 scheduling contention, so an
+    # off-peak minute reduces how often the trigger step gets throttled.
+    - cron: "30 4 * * *"
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -60,8 +63,9 @@ jobs:
           echo "Using Databricks host: ${DB_HOST}"
 
           # Trigger with retries — Free Edition sometimes returns FEATURE_DISABLED
-          # (HTTP 404) when the org is temporarily throttled. Retry up to 10 min.
-          TRIGGER_DEADLINE=$(( $(date +%s) + 600 ))
+          # (HTTP 404) when the org is temporarily throttled. The throttle can
+          # outlast a short window, so retry up to 30 min before giving up.
+          TRIGGER_DEADLINE=$(( $(date +%s) + 1800 ))
           TRIGGER_ATTEMPT=0
           RUN_ID=""
           while true; do
@@ -91,7 +95,8 @@ jobs:
             fi
 
             if [ "$(date +%s)" -ge "$TRIGGER_DEADLINE" ]; then
-              echo "Timed out trying to trigger Databricks job (${TRIGGER_ATTEMPT} attempts over 10 min)" >&2
+              echo "Timed out trying to trigger Databricks job (${TRIGGER_ATTEMPT} attempts over 30 min)" >&2
+              echo "The raw data was already uploaded to the Volume; the pipeline can be run manually from the Databricks UI once the org is un-throttled." >&2
               exit 1
             fi
             BACKOFF=$(( 30 * TRIGGER_ATTEMPT ))
