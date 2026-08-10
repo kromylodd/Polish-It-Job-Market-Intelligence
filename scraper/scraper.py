@@ -7,6 +7,7 @@ Cursor-based pagination, 10 results per page (hard cap), 10k total cap.
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +30,10 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-REQUEST_DELAY_SECONDS = 1.0
+# Delay between page requests. Lowered from 1.0s → 0.5s now that 429
+# `Retry-After` handling is in place (roughly halves the ~1000-page run);
+# override via REQUEST_DELAY_SECONDS if the API starts pushing back.
+REQUEST_DELAY_SECONDS = float(os.environ.get("REQUEST_DELAY_SECONDS", "0.5"))
 MAX_RETRIES = 3
 RETRY_BACKOFF_FACTOR = 2.0
 

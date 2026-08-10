@@ -299,13 +299,12 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 ## Roadmap
 
 - Lakeview dashboard on the gold marts for a visual/BI companion to the bot.
-- Lower the scrape delay now that 429 `Retry-After` handling exists (roughly halves runtime).
 - ~~Move the bot to a free-tier cloud VM for true 24/7 independence from a laptop.~~ ✅ Done — GCP `e2-micro` in `us-west1-b`.
 
 ## Scraping Ethics
 
 - Only publicly available listing data via justjoin.it's own JSON API — no authenticated endpoints, no HTML scraping, no bypassing access controls.
-- Requests are rate-limited (1s delay) with exponential backoff and `Retry-After` handling on 429s.
+- Requests are rate-limited (0.5s delay, env-tunable) with exponential backoff and `Retry-After` handling on 429s.
 - Scope is search-results fields only.
 
 ## Disclaimer
