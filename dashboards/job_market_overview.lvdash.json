@@ -1,0 +1,273 @@
+{
+  "datasets": [
+    {
+      "name": "ds_total_listings",
+      "displayName": "Total active listings",
+      "queryLines": [
+        "SELECT count(*) AS total_listings\n",
+        "FROM job_market.gold.mart_market_snapshot"
+      ]
+    },
+    {
+      "name": "ds_salary_by_tech",
+      "displayName": "Median monthly salary by technology (permanent, PLN)",
+      "queryLines": [
+        "SELECT technology_name,\n",
+        "       round(sum(median_salary * listing_count) / sum(listing_count)) AS median_monthly_pln,\n",
+        "       sum(listing_count) AS listings\n",
+        "FROM job_market.gold.mart_salary_by_technology\n",
+        "WHERE lower(employment_type) IN ('permanent','any') AND upper(currency) = 'PLN'\n",
+        "GROUP BY technology_name\n",
+        "HAVING sum(listing_count) >= 5\n",
+        "ORDER BY median_monthly_pln DESC\n",
+        "LIMIT 15"
+      ]
+    },
+    {
+      "name": "ds_demand_wow",
+      "displayName": "Hottest technologies (week-over-week)",
+      "queryLines": [
+        "SELECT technology_name, listing_count, wow_change\n",
+        "FROM job_market.gold.mart_demand_by_technology\n",
+        "WHERE week_start = (SELECT max(week_start) FROM job_market.gold.mart_demand_by_technology)\n",
+        "ORDER BY wow_change DESC\n",
+        "LIMIT 15"
+      ]
+    },
+    {
+      "name": "ds_market_trend",
+      "displayName": "Rolling listings & salary trend",
+      "queryLines": [
+        "SELECT full_date, rolling_7d_listings, rolling_7d_avg_salary\n",
+        "FROM job_market.gold.mart_market_trends\n",
+        "ORDER BY full_date"
+      ]
+    },
+    {
+      "name": "ds_city_summary",
+      "displayName": "Listings by city",
+      "queryLines": [
+        "SELECT city_name, listing_count, avg_salary_mid\n",
+        "FROM job_market.gold.mart_city_summary\n",
+        "ORDER BY listing_count DESC\n",
+        "LIMIT 12"
+      ]
+    },
+    {
+      "name": "ds_top_companies",
+      "displayName": "Top hiring companies",
+      "queryLines": [
+        "SELECT company_name, count(*) AS listing_count\n",
+        "FROM job_market.gold.mart_market_snapshot\n",
+        "WHERE company_name IS NOT NULL\n",
+        "GROUP BY company_name\n",
+        "ORDER BY listing_count DESC\n",
+        "LIMIT 15"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "overview",
+      "displayName": "Market Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "w_total",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_total_listings",
+                  "fields": [{ "name": "total_listings", "expression": "`total_listings`" }],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "total_listings",
+                  "displayName": "Total active listings",
+                  "rowNumber": 1
+                }
+              }
+            }
+          },
+          "position": { "x": 0, "y": 0, "width": 2, "height": 3 }
+        },
+        {
+          "widget": {
+            "name": "w_salary_by_tech",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_salary_by_tech",
+                  "fields": [
+                    { "name": "technology_name", "expression": "`technology_name`" },
+                    { "name": "median_monthly_pln", "expression": "`median_monthly_pln`" }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "median_monthly_pln",
+                  "scale": { "type": "quantitative" },
+                  "displayName": "Median monthly PLN"
+                },
+                "y": {
+                  "fieldName": "technology_name",
+                  "scale": { "type": "categorical" },
+                  "displayName": "Technology"
+                }
+              }
+            }
+          },
+          "position": { "x": 2, "y": 0, "width": 4, "height": 6 }
+        },
+        {
+          "widget": {
+            "name": "w_demand_wow",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_demand_wow",
+                  "fields": [
+                    { "name": "technology_name", "expression": "`technology_name`" },
+                    { "name": "wow_change", "expression": "`wow_change`" }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "wow_change",
+                  "scale": { "type": "quantitative" },
+                  "displayName": "WoW change"
+                },
+                "y": {
+                  "fieldName": "technology_name",
+                  "scale": { "type": "categorical" },
+                  "displayName": "Technology"
+                }
+              }
+            }
+          },
+          "position": { "x": 0, "y": 3, "width": 2, "height": 6 }
+        },
+        {
+          "widget": {
+            "name": "w_trend",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_market_trend",
+                  "fields": [
+                    { "name": "full_date", "expression": "`full_date`" },
+                    { "name": "rolling_7d_listings", "expression": "`rolling_7d_listings`" }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "full_date",
+                  "scale": { "type": "temporal" },
+                  "displayName": "Date"
+                },
+                "y": {
+                  "fieldName": "rolling_7d_listings",
+                  "scale": { "type": "quantitative" },
+                  "displayName": "Rolling 7d listings"
+                }
+              }
+            }
+          },
+          "position": { "x": 0, "y": 9, "width": 6, "height": 6 }
+        },
+        {
+          "widget": {
+            "name": "w_city",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_city_summary",
+                  "fields": [
+                    { "name": "city_name", "expression": "`city_name`" },
+                    { "name": "listing_count", "expression": "`listing_count`" }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "city_name",
+                  "scale": { "type": "categorical" },
+                  "displayName": "City"
+                },
+                "y": {
+                  "fieldName": "listing_count",
+                  "scale": { "type": "quantitative" },
+                  "displayName": "Listings"
+                }
+              }
+            }
+          },
+          "position": { "x": 0, "y": 15, "width": 3, "height": 6 }
+        },
+        {
+          "widget": {
+            "name": "w_top_companies",
+            "queries": [
+              {
+                "name": "main",
+                "query": {
+                  "datasetName": "ds_top_companies",
+                  "fields": [
+                    { "name": "company_name", "expression": "`company_name`" },
+                    { "name": "listing_count", "expression": "`listing_count`" }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  { "fieldName": "company_name", "displayName": "Company" },
+                  { "fieldName": "listing_count", "displayName": "Listings" }
+                ]
+              }
+            }
+          },
+          "position": { "x": 3, "y": 15, "width": 3, "height": 6 }
+        }
+      ]
+    }
+  ]
+}

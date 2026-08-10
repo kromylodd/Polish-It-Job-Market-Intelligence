@@ -64,3 +64,4 @@ data/
 *.json
 !scraper/tests/sample_raw_listing.json
 !dbt/seeds/*.csv
+!dashboards/*.lvdash.json
