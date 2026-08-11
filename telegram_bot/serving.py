@@ -557,10 +557,7 @@ def rank_listings_by_skills(listings: list[dict], skills: list[str]) -> list[dic
 
     ranked = []
     for listing in listings:
-        techs = listing.get("technologies", [])
-        if isinstance(techs, str):
-            techs = [t.strip() for t in techs.split(",") if t.strip()]
-        listing_techs = {str(t).lower() for t in techs}
+        listing_techs = _extract_all_techs(listing)
         matched = wanted & listing_techs
         pct = round(100 * len(matched) / len(wanted)) if wanted else 0
         item = dict(listing)
@@ -569,3 +566,19 @@ def rank_listings_by_skills(listings: list[dict], skills: list[str]) -> list[dic
         ranked.append(item)
     ranked.sort(key=lambda x: x["match_pct"], reverse=True)
     return ranked
+
+
+def _extract_all_techs(listing: dict) -> set[str]:
+    """Extract all technology/skill names from a listing (lowercased).
+
+    Checks technologies, required_skills, and nice_to_have_skills fields —
+    same sources as the filter logic in filters._get_listing_techs.
+    """
+    techs: set[str] = set()
+    for key in ("technologies", "required_skills", "nice_to_have_skills"):
+        val = listing.get(key, [])
+        if isinstance(val, str):
+            techs.update(t.strip().lower() for t in val.split(",") if t.strip())
+        elif isinstance(val, list):
+            techs.update(str(t).strip().lower() for t in val if t)
+    return techs

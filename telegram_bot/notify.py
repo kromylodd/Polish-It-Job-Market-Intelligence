@@ -175,7 +175,12 @@ def format_listing(listing: dict) -> str:
     def esc(value: object) -> str:
         return html.escape(str(value))
 
+    pct_line = ""
+    if listing.get("match_pct") is not None:
+        pct_line = f"🎯 {listing['match_pct']}% skill match\n"
+
     return (
+        f"{pct_line}"
         f"<b>{esc(listing.get('title', ''))}</b>\n"
         f"{esc(listing.get('company_name', ''))} | {esc(cities)} | "
         f"{esc(listing.get('workplace_type', ''))}\n"
