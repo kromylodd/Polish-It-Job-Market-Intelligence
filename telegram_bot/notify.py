@@ -226,7 +226,9 @@ def format_listing(listing: dict) -> str:
     )
 
 
-def send_message(chat_id: str, text: str) -> bool:
+def send_message(
+    chat_id: str, text: str, reply_markup=None, disable_notification: bool = False
+) -> bool:
     """Send message via Telegram Bot API to a specific chat."""
     if not TELEGRAM_BOT_TOKEN or not chat_id:
         return False
@@ -236,7 +238,10 @@ def send_message(chat_id: str, text: str) -> bool:
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
+        "disable_notification": disable_notification,
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         resp = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
         resp.raise_for_status()
@@ -274,6 +279,21 @@ def _build_combined_message(listings: list[dict]) -> list[str]:
         chunks.append(current)
 
     return chunks
+
+
+def _tracker_markup(listing_id: str) -> dict | None:
+    """Build inline keyboard markup with tracker buttons for a listing."""
+    if not listing_id:
+        return None
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Applied", "callback_data": f"trk:applied:{listing_id}"},
+                {"text": "👀 Interested", "callback_data": f"trk:interested:{listing_id}"},
+                {"text": "❌ Not interested", "callback_data": f"trk:rejected:{listing_id}"},
+            ]
+        ]
+    }
 
 
 def _cap_for(config: dict) -> int:
@@ -324,17 +344,32 @@ def broadcast(con) -> int:
                 )
             continue
 
-        # Build combined message(s) and send
-        chunks = _build_combined_message(to_send)
-        for chunk in chunks:
-            send_message(chat_id, chunk)
-            time.sleep(0.5)
+        # Skill ranking: if the user has saved skills, rank by overlap and add match_pct
+        user_skills = config.get("skills") or []
+        if user_skills:
+            from telegram_bot.serving import rank_listings_by_skills
+
+            to_send = rank_listings_by_skills(to_send, user_skills)
+
+        # Send a header (with notification sound), then each listing individually
+        # with tracker buttons (silently). This gives the user one notification
+        # but each listing has its own interactive buttons.
+        header = f"<b>📋 Daily alert — {len(to_send)} new matches</b>"
+        send_message(chat_id, header, disable_notification=False)
+        time.sleep(0.3)
+
+        for listing in to_send:
+            text = format_listing(listing)
+            lid = listing.get("listing_id", "")
+            markup = _tracker_markup(lid)
+            send_message(chat_id, text, reply_markup=markup, disable_notification=True)
+            time.sleep(0.4)
 
         # Record all as sent
         pairs = [(listing["listing_id"], str(chat_id)) for listing in to_send]
         new_pairs.extend(pairs)
         total_sent += len(pairs)
-        logger.info(f"chat {chat_id}: sent {len(pairs)} listings in {len(chunks)} message(s)")
+        logger.info(f"chat {chat_id}: sent {len(pairs)} listings")
 
     # Batch-write all sent records (use a write connection)
     if new_pairs:
