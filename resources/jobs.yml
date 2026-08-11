@@ -7,12 +7,9 @@ resources:
       name: "job_market_pipeline"
       description: "Daily pipeline: ingest raw listings → bronze → silver → gold star schema → alerts"
 
-      # File arrival trigger on the raw Volume (primary)
-      # Fallback: triggered via Jobs API run-now from GitHub Actions
-      trigger:
-        file_arrival:
-          url: /Volumes/job_market/bronze/raw_listings/
-          min_time_between_triggers_seconds: 600
+      # Triggered exclusively via Jobs API run-now from GitHub Actions (scrape.yml).
+      # No file_arrival trigger — Free Edition file-arrival + explicit API trigger
+      # caused double-runs (each upload triggered both paths simultaneously).
 
       tasks:
         - task_key: bronze_ingest

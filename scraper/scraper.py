@@ -153,12 +153,16 @@ def scrape_listings(
 
 
 def save_raw_output(listings: list[dict[str, Any]], output_dir: str = "data") -> Path:
-    """Save listings to timestamped JSON file."""
+    """Save listings to a fixed-name JSON file (overwritten each run).
+
+    Using a fixed filename avoids accumulating hundreds of timestamped files in
+    the Databricks Volume and eliminates spurious file-arrival triggers from
+    multiple unique filenames.
+    """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    filepath = output_path / f"raw_listings_{timestamp}.json"
+    filepath = output_path / "raw_listings_latest.json"
 
     output = {
         "metadata": {

@@ -33,18 +33,17 @@ jobs:
 
       - name: Upload to Databricks Volume
         run: |
-          # Upload the latest raw JSON file to Unity Catalog Volume
-          LATEST_FILE=$(ls -t data/raw_listings_*.json 2>/dev/null | head -1)
-          if [ -z "$LATEST_FILE" ]; then
+          # Upload the fixed-name raw JSON file to Unity Catalog Volume
+          LATEST_FILE="data/raw_listings_latest.json"
+          if [ ! -f "$LATEST_FILE" ]; then
             echo "No output file found — scraper may have failed"
             exit 1
           fi
           echo "Uploading: $LATEST_FILE"
           python -m scraper.uploader "$LATEST_FILE"
 
-      # Fallback: trigger Databricks Workflow via API since file-arrival
-      # triggers don't work on Free Edition, then poll the run to completion so
-      # the notify job only starts once gold data is actually ready.
+      # Trigger Databricks Workflow via API (the sole trigger mechanism).
+      # file_arrival was removed from the job definition to prevent double-runs.
       - name: Trigger Databricks Workflow and wait
         if: success()
         run: |
