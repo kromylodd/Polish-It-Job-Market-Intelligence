@@ -45,7 +45,14 @@ def _run_dbt(command: list[str], description: str) -> bool:
     env = os.environ.copy()
     env["PIPELINE_DB_PATH"] = str(PIPELINE_DB_PATH)
 
-    cmd = ["dbt"] + command + ["--profiles-dir", ".", "--target", "local"]
+    # Use dbt from the same Python environment as the running interpreter.
+    # This ensures we use the venv's dbt, not a system-wide one that may not exist.
+    dbt_bin = str(Path(sys.executable).parent / "dbt")
+    if not Path(dbt_bin).exists():
+        # Fallback to PATH-based dbt
+        dbt_bin = "dbt"
+
+    cmd = [dbt_bin] + command + ["--profiles-dir", ".", "--target", "local"]
     logger.info("Running: %s", " ".join(cmd))
 
     result = subprocess.run(
