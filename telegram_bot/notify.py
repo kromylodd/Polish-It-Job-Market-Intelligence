@@ -165,7 +165,7 @@ def format_listing(listing: dict) -> str:
     salary_str = "Undisclosed"
     if listing.get("salary_min") and listing.get("salary_max"):
         salary_str = (
-            f"{int(listing['salary_min'])}-{int(listing['salary_max'])} "
+            f"{int(float(listing['salary_min']))}-{int(float(listing['salary_max']))} "
             f"{listing.get('currency', 'PLN')} ({listing.get('employment_type', '')})"
         )
 
