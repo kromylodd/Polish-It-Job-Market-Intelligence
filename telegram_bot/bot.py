@@ -1548,11 +1548,12 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    tech = context.args[0]
+    tech = " ".join(context.args)
     data = await asyncio.to_thread(serving.skills_for_tech, tech)
     if not data or not data.get("related"):
         await update.message.reply_text(
-            f"📭 No co-occurrence data for <b>{_esc(tech)}</b> yet.", parse_mode="HTML"
+            f"📭 No co-occurrence data for <b>{_esc(tech)}</b> yet.",
+            parse_mode="HTML",
         )
         return
 
@@ -1711,7 +1712,7 @@ async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
         return
 
-    skills = [s.strip() for s in " ".join(args).replace(",", " ").split() if s.strip()]
+    skills = _parse_tech_args(args)
     config["skills"] = skills
     save_config(chat_id, config)
     await update.message.reply_text(
