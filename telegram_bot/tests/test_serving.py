@@ -204,4 +204,5 @@ def test_rank_listings_by_skills(serving):
 def test_rank_listings_handles_string_techs(serving):
     listings = [{"listing_id": "a", "technologies": "Python, SQL"}]
     ranked = serving.rank_listings_by_skills(listings, ["python"])
-    assert ranked[0]["match_pct"] == 100
+    # Listing needs 2 techs (Python, SQL), user has 1 → 50%
+    assert ranked[0]["match_pct"] == 50

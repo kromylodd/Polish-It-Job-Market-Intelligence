@@ -546,6 +546,9 @@ def hot_technologies(limit: int = 10) -> list[dict]:
 def rank_listings_by_skills(listings: list[dict], skills: list[str]) -> list[dict]:
     """Rank listings by percent overlap with the user's skill set.
 
+    match_pct = what % of the LISTING's required techs does the user have.
+    E.g. listing needs [SQL, Data, Databases], user has all 3 → 100%.
+
     Adds ``match_pct`` and ``matched_skills`` to a copy of each listing and returns
     them sorted by match_pct desc. Pure set-overlap — no ML, no DuckDB needed.
     """
@@ -558,8 +561,12 @@ def rank_listings_by_skills(listings: list[dict], skills: list[str]) -> list[dic
     ranked = []
     for listing in listings:
         listing_techs = _extract_all_techs(listing)
-        matched = wanted & listing_techs
-        pct = round(100 * len(matched) / len(wanted)) if wanted else 0
+        if not listing_techs:
+            pct = 0
+            matched = set()
+        else:
+            matched = wanted & listing_techs
+            pct = round(100 * len(matched) / len(listing_techs))
         item = dict(listing)
         item["match_pct"] = pct
         item["matched_skills"] = sorted(matched)

@@ -1413,7 +1413,16 @@ def _save_feedback(chat_id: int, text: str):
 
 
 def _get_latest_listings(config: dict, limit: int = payments.FREE_MAX_LISTINGS) -> list[dict]:
-    """Try Databricks, fall back to local data files."""
+    """Try local DuckDB cache (fast), then Databricks, then local JSON files."""
+    # Fast path: use the locally-cached mart_market_snapshot (synced by JobQueue).
+    try:
+        rows = _query_local_cache()
+        if rows:
+            return filter_listings(rows, config)[:limit]
+    except Exception as e:
+        logger.debug(f"Local DuckDB cache unavailable: {e}")
+
+    # Slow path: Databricks SQL warehouse (cold start possible).
     databricks_host = os.environ.get("DATABRICKS_HOST", "")
     databricks_token = os.environ.get("DATABRICKS_TOKEN", "")
     warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
@@ -1422,9 +1431,37 @@ def _get_latest_listings(config: dict, limit: int = payments.FREE_MAX_LISTINGS) 
         try:
             return _query_databricks_latest(config, limit)
         except Exception as e:
-            logger.warning(f"Databricks failed, using local: {e}")
+            logger.warning(f"Databricks failed, using local JSON: {e}")
 
     return _read_local_latest(config, limit)
+
+
+def _query_local_cache() -> list[dict] | None:
+    """Query the local DuckDB serving cache for market_snapshot rows."""
+    if not serving.is_ready():
+        return None
+    import duckdb
+
+    con = duckdb.connect(str(serving.SERVING_DB_PATH), read_only=True)
+    try:
+        result = con.execute(
+            "SELECT * FROM market_snapshot ORDER BY posted_date DESC LIMIT 500"
+        ).fetchdf()
+    finally:
+        con.close()
+
+    if result.empty:
+        return None
+
+    rows = result.to_dict("records")
+    # Normalize numpy/pandas types to plain Python
+    for row in rows:
+        for k, v in row.items():
+            if hasattr(v, "tolist"):
+                row[k] = v.tolist()
+            elif hasattr(v, "item"):
+                row[k] = v.item()
+    return rows
 
 
 def _ondemand_sql_connect():
@@ -1565,9 +1602,6 @@ async def _send_trackable_listing(message, listing: dict):
 
     lid = _remember_listing(listing)
     text = format_listing(listing)
-    pct = listing.get("match_pct")
-    if pct is not None:
-        text = f"🎯 <b>{pct}% skill match</b>\n{text}"
 
     markup = None
     if lid:
