@@ -660,13 +660,56 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Technology filter cleared (matching any)")
         return
 
+    if args and args[0].lower() == "add":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /tech add Apache Airflow Docker")
+            return
+        new_techs = _parse_tech_args(list(args[1:]))
+        config = load_config(update.effective_chat.id)
+        current = config.get("technologies", [])
+        current_lower = {t.lower() for t in current}
+        added = [t for t in new_techs if t.lower() not in current_lower]
+        config["technologies"] = current + added
+        save_config(update.effective_chat.id, config)
+        log_filter_choice(update.effective_chat.id, "technology", config["technologies"])
+        if added:
+            await update.message.reply_text(
+                f"✅ Added: {', '.join(added)}\n" f"💻 All: {', '.join(config['technologies'])}",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text("ℹ️ Those are already in your tech filter.")
+        return
+
+    if args and args[0].lower() == "remove":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /tech remove Python Docker")
+            return
+        to_remove = _parse_tech_args(list(args[1:]))
+        to_remove_lower = {t.lower() for t in to_remove}
+        config = load_config(update.effective_chat.id)
+        current = config.get("technologies", [])
+        removed = [t for t in current if t.lower() in to_remove_lower]
+        config["technologies"] = [t for t in current if t.lower() not in to_remove_lower]
+        save_config(update.effective_chat.id, config)
+        if removed:
+            remaining = ", ".join(config["technologies"]) if config["technologies"] else "any"
+            await update.message.reply_text(
+                f"✅ Removed: {', '.join(removed)}\n💻 Current: {remaining}"
+            )
+        else:
+            await update.message.reply_text("❌ None of those were in your tech filter.")
+        return
+
     if not args:
         config = load_config(update.effective_chat.id)
         techs = config.get("technologies", [])
         current = ", ".join(techs) if techs else "any (no filter)"
         await update.message.reply_text(
             f"💻 <b>Tech filter:</b> {current}\n\n"
-            f"<b>Usage:</b> <code>/tech Python SQL Docker</code>\n"
+            f"<b>Set (overwrite):</b> <code>/tech Python SQL Docker</code>\n"
+            f"<b>Add:</b> <code>/tech add Apache Airflow</code>\n"
+            f"<b>Remove:</b> <code>/tech remove Python</code>\n"
             f"<b>Browse all:</b> /tech list\n"
             f"<b>Clear:</b> /tech clear\n\n"
             f"<i>🔍 This is a <b>filter</b>: only listings mentioning these "
@@ -952,14 +995,21 @@ async def cmd_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = ", ".join(cities) if cities else "any (all locations)"
         await update.message.reply_text(
             f"🏙️ <b>Current:</b> {current}\n\n"
-            f"<b>Add cities:</b> /city Warszawa Kraków\n"
+            f"<b>Add:</b> /city add Warszawa Kraków\n"
             f"<b>Remove:</b> /city remove Kraków\n"
             f"<b>See known:</b> /city list\n"
             f"<b>Clear all:</b> /city clear\n\n"
-            f"<i>Adding cities doesn't remove existing ones.</i>",
+            f"<i>Bare /city Warszawa also adds (same as /city add).</i>",
             parse_mode="HTML",
         )
         return
+
+    # Strip optional "add" keyword for consistency with /tech add, /myskills add
+    if args and args[0].lower() == "add":
+        args = args[1:]
+        if not args:
+            await update.message.reply_text("Usage: /city add Warszawa Kraków")
+            return
 
     # Additive: add new cities to existing list
     from telegram_bot.filters import KNOWN_CITIES
@@ -1688,8 +1738,10 @@ async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = ", ".join(skills) if skills else "none set"
         await update.message.reply_text(
             f"🧠 <b>Your skills:</b> {_esc(current)}\n\n"
-            "Set: <code>/myskills python sql airflow</code>\n"
-            "Browse suggestions: <code>/myskills list</code>\n"
+            "Set (overwrite): <code>/myskills python sql airflow</code>\n"
+            "Add: <code>/myskills add Apache Airflow</code>\n"
+            "Remove: <code>/myskills remove sql</code>\n"
+            "Browse: <code>/myskills list</code>\n"
             "Clear: <code>/myskills clear</code>\n\n"
             "<i>🏆 This <b>ranks</b> your /latest results by % skill overlap — "
             "it does NOT exclude listings. Use /tech to filter instead.</i>",
@@ -1710,6 +1762,46 @@ async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  <code>{', '.join(techs)}</code>\n")
         lines.append("<i>You can use any name — these are just suggestions.</i>")
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    if args[0].lower() == "add":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /myskills add Python Docker")
+            return
+        new_skills = _parse_tech_args(list(args[1:]))
+        current = config.get("skills", [])
+        current_lower = {s.lower() for s in current}
+        added = [s for s in new_skills if s.lower() not in current_lower]
+        config["skills"] = current + added
+        save_config(chat_id, config)
+        if added:
+            await update.message.reply_text(
+                f"✅ Added: {_esc(', '.join(added))}\n"
+                f"🧠 All skills: {_esc(', '.join(config['skills']))}",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text("ℹ️ Those skills are already in your list.")
+        return
+
+    if args[0].lower() == "remove":
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /myskills remove Python Docker")
+            return
+        to_remove = _parse_tech_args(list(args[1:]))
+        to_remove_lower = {s.lower() for s in to_remove}
+        current = config.get("skills", [])
+        removed = [s for s in current if s.lower() in to_remove_lower]
+        config["skills"] = [s for s in current if s.lower() not in to_remove_lower]
+        save_config(chat_id, config)
+        if removed:
+            remaining = ", ".join(config["skills"]) if config["skills"] else "none"
+            await update.message.reply_text(
+                f"✅ Removed: {_esc(', '.join(removed))}\n🧠 Current: {_esc(remaining)}",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text("❌ None of those were in your skills.")
         return
 
     skills = _parse_tech_args(args)
