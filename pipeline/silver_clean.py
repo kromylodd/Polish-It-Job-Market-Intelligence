@@ -53,7 +53,8 @@ def clean() -> int:
         # 2. Standardize: trim + lower on text fields
         # 3. Normalize: "office" → "onsite"
         # 4. Filter: non-null listing_id, title, company_name
-        con.execute(f"""
+        con.execute(
+            f"""
             CREATE TABLE {SILVER_TABLE} AS
             WITH ranked AS (
                 SELECT *,
@@ -100,7 +101,8 @@ def clean() -> int:
             WHERE listing_id IS NOT NULL
               AND title IS NOT NULL AND title != ''
               AND company_name IS NOT NULL AND company_name != ''
-        """)
+        """
+        )
         con.commit()
 
         silver_count = con.execute(f"SELECT count(*) FROM {SILVER_TABLE}").fetchone()[0]

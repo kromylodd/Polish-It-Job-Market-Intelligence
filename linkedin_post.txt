@@ -1,41 +1,37 @@
-Most portfolio data projects die at a dashboard nobody opens.
+Yesterday I opened the Databricks run history and saw a picket fence.
 
-So I built one that answers the only 3 questions a job seeker actually asks — every day, in under a second, right inside Telegram.
+Dozens of runs in a few hours. Every scrape was triggering the pipeline twice — once from the file upload (file_arrival), once from the API call. Both had comments saying "primary trigger" in different config files. Both were right. Both were wrong together.
 
-Meet Polish IT Job Market Intelligence: a lakehouse pipeline that ends in a bot people actually use, not a chart that gets screenshotted once.
+It got worse: each run wrote a uniquely-timestamped file. So every debug re-run created a new file, each one firing the pipeline again. A few hours of debugging × 2 triggers per upload = the pattern you see in the screenshot.
 
-Every day it pulls ~10k live Polish IT listings through a Databricks medallion pipeline (bronze → silver → gold), models them into a dbt star schema, passes a data-quality gate — and the gold tables answer, instantly:
+The fix was mass:
+→ One fixed filename that overwrites itself (no more pile-up)
+→ One trigger mechanism (API-only, file_arrival removed entirely)
+→ One upload → one run. Period.
 
-→ "What should I learn?" — /skills Python returns "often requested with: SQL 71%, Airflow 43%." No other Polish job bot does technology co-occurrence.
-→ "Where should I apply?" — /company Allegro shows live openings, salary range, sample roles.
-→ "What should I earn?" — /salary Python [senior] gives real percentiles per seniority.
+This is what I've been building for the past 2 weeks - a Telegram bot that delivers Polish IT job listings daily at 08:00, with salary breakdowns by contract type, skill co-occurrence analysis, and company intel. All personalized to your filters.
 
-Plus daily push alerts, a 7-dimension filter system, a one-tap application tracker — and a paid tier billed in Telegram Stars, with the full checkout flow wired end to end.
+What it does for job seekers:
+• Daily digest at 08:00 Warsaw - matching YOUR seniority, tech stack, city, workplace
+• Salary insights split by UoP vs B2B (no more mixing hourly and monthly in one number)
+• "Which skills appear together with Python?" - actual co-occurrence from 10,000+ listings
+• Application tracker built into the chat
+• 24h free premium trial on signup - no card, no friction
 
-The part I'm most proud of isn't a feature — it's a trade-off.
+What's under the hood:
+Databricks (Unity Catalog + Delta Lake) → dbt → DuckDB serving cache → python-telegram-bot + Telegram Stars payments. Scraper on GitHub Actions, bot on GCP e2-micro (free tier, 24/7). The full pipeline: scrape → bronze → silver → gold marts → DuckDB sync → user-facing bot. All open-source.
 
-Databricks Free warehouses go cold and take tens of seconds to wake. Unacceptable for a bot a user is staring at. So the bot never queries the warehouse live: it syncs the small gold marts into a local DuckDB cache and answers every query from there — instant, offline-capable, immune to cold starts. Databricks is the system of record; DuckDB is a disposable read-cache next to the app.
+Stack I picked up for this project that wasn't in my previous one (Polish Housing — GCP/BigQuery/Airflow/Terraform/Power BI):
+• Databricks ecosystem (Unity Catalog, Delta Lake, Workflows, Asset Bundles)
+• PySpark
+• DuckDB as a serving layer
+• Telegram Stars (native payments, no Stripe)
+• systemd deployment on a $0 VM
 
-This is the deliberate sequel to my first data platform (Polish Housing), which was GCP-native: BigQuery, GCS, Airflow, Terraform, Great Expectations, Power BI.
+I'm not launching until this runs clean for 2-3 days with zero double-triggers and zero silent failures. Thursday/Friday is the target.
 
-This one is a completely different stack I hadn't touched before — on purpose:
-• Databricks — Unity Catalog + Delta Lake
-• PySpark for the transforms
-• Databricks Workflows (a 2nd orchestrator)
-• Databricks Asset Bundles (a 2nd IaC tool)
-• DuckDB as a sub-second serving cache
-• python-telegram-bot + Telegram Stars payments
-• SQLite state, matplotlib charts, systemd hosting
+If you're job hunting in Poland's IT market (or know someone who is) - comment or DM for early access before the public launch. I want 5–10 real users stress-testing filters before I open the doors.
 
-Two platforms, same class of system, engineered from scratch — because I'd rather prove I can design the architecture than memorize one vendor.
+Repo is in the comments.
 
-I documented the failures too: a cold-warehouse hang that froze the bot for 15 minutes, a masked dbt failure that showed green while skipping every downstream table, a 39MB upload that stalled until I gzipped it 10x. The honest caveats are in the README on purpose.
-
-I'm launching publicly this week. Before I do, I want the read from people who've shipped and hired more than I have:
-
-If you were reviewing this as a hiring manager — or you've launched a side project to real users — what's the ONE thing you'd fix or add before it goes live? I'd genuinely rather hear it now than after launch.
-
-Full write-up + architecture diagrams: repo link in comments.
-Connect: https://www.linkedin.com/in/daniil-demidov-a610753a9/
-
-#DataEngineering #Databricks #PySpark #dbt #DuckDB #Lakehouse
+#DataEngineering #Databricks #BuildInPublic #TelegramBot #dbt #Python #JobMarket

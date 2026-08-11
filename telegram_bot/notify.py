@@ -98,14 +98,16 @@ def load_all_user_configs() -> dict[str, dict]:
 def ensure_alerts_sent_table(con):
     """Create the idempotency log table if it doesn't exist."""
     con.execute(f"CREATE SCHEMA IF NOT EXISTS {ALERTS_SCHEMA}")
-    con.execute(f"""
+    con.execute(
+        f"""
         CREATE TABLE IF NOT EXISTS {ALERTS_SENT_TABLE} (
             listing_id VARCHAR NOT NULL,
             chat_id VARCHAR NOT NULL,
             sent_at TIMESTAMP DEFAULT current_timestamp,
             PRIMARY KEY (listing_id, chat_id)
         )
-    """)
+    """
+    )
 
 
 def query_recent_listings(con) -> list[dict]:
@@ -117,7 +119,8 @@ def query_recent_listings(con) -> list[dict]:
     idempotency log instead, so each user is alerted about a given listing once.
     """
     try:
-        result = con.execute("""
+        result = con.execute(
+            """
             SELECT listing_id, title, slug, company_name, seniority,
                    employment_type, workplace_type, category,
                    salary_min, salary_max, currency,
@@ -125,7 +128,8 @@ def query_recent_listings(con) -> list[dict]:
             FROM gold.mart_market_snapshot
             ORDER BY posted_date DESC
             LIMIT 500
-        """).fetchall()
+        """
+        ).fetchall()
 
         columns = [
             "listing_id",

@@ -25,7 +25,8 @@ BRONZE_TABLE = f"{SCHEMA_BRONZE}.raw_job_listings"
 def _ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
     """Create the bronze schema and table if they don't exist."""
     con.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_BRONZE}")
-    con.execute(f"""
+    con.execute(
+        f"""
         CREATE TABLE IF NOT EXISTS {BRONZE_TABLE} (
             listing_id VARCHAR NOT NULL,
             slug VARCHAR,
@@ -53,7 +54,8 @@ def _ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
             source_file VARCHAR,
             ingested_at TIMESTAMP DEFAULT current_timestamp
         )
-    """)
+    """
+    )
 
 
 def _already_ingested(con: duckdb.DuckDBPyConnection, run_id: str) -> bool:
