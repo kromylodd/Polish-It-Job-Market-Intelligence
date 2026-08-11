@@ -705,9 +705,16 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Bare args (no add/remove keyword) default to add behavior
     config = load_config(update.effective_chat.id)
     new_techs = _parse_tech_args(args)
+    # Deduplicate within the same message
+    seen: set[str] = set()
+    unique_new: list[str] = []
+    for t in new_techs:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            unique_new.append(t)
     current = config.get("technologies", [])
     current_lower = {t.lower() for t in current}
-    added = [t for t in new_techs if t.lower() not in current_lower]
+    added = [t for t in unique_new if t.lower() not in current_lower]
     config["technologies"] = current + added
     save_config(update.effective_chat.id, config)
     log_filter_choice(update.effective_chat.id, "technology", config["technologies"])
@@ -1785,9 +1792,16 @@ async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Default: additive (no overwrite)
     new_skills = _parse_tech_args(args)
+    # Deduplicate within the same message
+    seen: set[str] = set()
+    unique_new: list[str] = []
+    for s in new_skills:
+        if s.lower() not in seen:
+            seen.add(s.lower())
+            unique_new.append(s)
     current = config.get("skills", [])
     current_lower = {s.lower() for s in current}
-    added = [s for s in new_skills if s.lower() not in current_lower]
+    added = [s for s in unique_new if s.lower() not in current_lower]
     config["skills"] = current + added
     save_config(chat_id, config)
     if added:
