@@ -171,3 +171,18 @@ def remove(chat_id: int, listing_id: str) -> bool:
             return cur.rowcount > 0
         finally:
             conn.close()
+
+
+def tracked_listing_ids(chat_id: int) -> set[str]:
+    """Return the set of listing IDs this user has interacted with (any status)."""
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            rows = conn.execute(
+                "SELECT listing_id FROM applications WHERE chat_id=?",
+                (chat_id,),
+            ).fetchall()
+            return {row[0] for row in rows}
+        finally:
+            conn.close()

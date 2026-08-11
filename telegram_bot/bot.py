@@ -105,7 +105,7 @@ BOT_COMMANDS = [
     BotCommand("start", "Welcome + overview"),
     BotCommand("filters", "View & edit your filters"),
     BotCommand("tolerance", "Set mismatch tolerance"),
-    BotCommand("myskills", "Set your skills (ranks results)"),
+    BotCommand("tech", "Set your skills (filter + rank)"),
     BotCommand("latest", "💎 Recent matching listings"),
     BotCommand("premium", "💎 Premium menu (analytics, tracker…)"),
     BotCommand("subscribe", "Premium tiers & pricing"),
@@ -656,8 +656,9 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and args[0].lower() == "clear":
         config = load_config(update.effective_chat.id)
         config["technologies"] = []
+        config["skills"] = []
         save_config(update.effective_chat.id, config)
-        await update.message.reply_text("✅ Technology filter cleared (matching any)")
+        await update.message.reply_text("✅ Tech/skills cleared (matching any, no ranking)")
         return
 
     if args and args[0].lower() == "add":
@@ -676,6 +677,8 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = config.get("technologies", [])
         removed = [t for t in current if t.lower() in to_remove_lower]
         config["technologies"] = [t for t in current if t.lower() not in to_remove_lower]
+        # Keep skills in sync
+        config["skills"] = config["technologies"][:]
         save_config(update.effective_chat.id, config)
         if removed:
             remaining = ", ".join(config["technologies"]) if config["technologies"] else "any"
@@ -683,7 +686,7 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Removed: {', '.join(removed)}\n💻 Current: {remaining}"
             )
         else:
-            await update.message.reply_text("❌ None of those were in your tech filter.")
+            await update.message.reply_text("❌ None of those were in your tech list.")
         return
 
     if not args:
@@ -691,13 +694,13 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         techs = config.get("technologies", [])
         current = ", ".join(techs) if techs else "any (no filter)"
         await update.message.reply_text(
-            f"💻 <b>Tech filter:</b> {current}\n\n"
+            f"💻 <b>Your tech/skills:</b> {current}\n\n"
             f"<b>Add:</b> <code>/tech add Python Docker</code>\n"
             f"<b>Remove:</b> <code>/tech remove Python</code>\n"
             f"<b>Browse all:</b> /tech list\n"
             f"<b>Clear:</b> /tech clear\n\n"
-            f"<i>🔍 This is a <b>filter</b>: only listings mentioning these "
-            f"technologies will appear. See /myskills for ranking without filtering.</i>",
+            f"<i>Your techs are used for both <b>filtering</b> (only show listings "
+            f"with these techs) and <b>ranking</b> (% skill match in results).</i>",
             parse_mode="HTML",
         )
         return
@@ -716,6 +719,8 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_lower = {t.lower() for t in current}
     added = [t for t in unique_new if t.lower() not in current_lower]
     config["technologies"] = current + added
+    # Keep skills in sync — same list
+    config["skills"] = config["technologies"][:]
     save_config(update.effective_chat.id, config)
     log_filter_choice(update.effective_chat.id, "technology", config["technologies"])
     if added:
@@ -1163,35 +1168,29 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if skills:
         listings = serving.rank_listings_by_skills(listings, skills)
 
-    count = len(listings)
-    chat_id = update.effective_chat.id
+    # Hide listings the user already interacted with (in tracker)
+    tracked_ids = tracker.tracked_listing_ids(update.effective_chat.id)
+    if tracked_ids:
+        listings = [li for li in listings if li.get("listing_id") not in tracked_ids]
 
-    # Pro users with the tracker feature get per-listing messages with
-    # Applied/Interested/Rejected buttons; everyone else gets the compact,
-    # combined (anti-spam) format.
-    if has_feature(chat_id, payments.FEATURE_TRACKER):
-        for listing in listings[:10]:
-            await _send_trackable_listing(update.message, listing)
-            await asyncio.sleep(0.2)
-    else:
-        from telegram_bot.notify import _build_combined_message
-
-        chunks = _build_combined_message(listings[:10])
-        for chunk in chunks:
-            try:
-                await update.message.reply_text(
-                    chunk,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to send listing chunk: {e}")
-                continue
-            await asyncio.sleep(0.3)
-
-    if count > 10:
+    if not listings:
         await update.message.reply_text(
-            f"<i>Showing 10/{count}. Narrow your filters for more relevant results.</i>",
+            "📭 No new listings — you've already seen all current matches.\n"
+            "Check back tomorrow for fresh listings!",
+        )
+        return
+
+    count = len(listings)
+    display_limit = min(cap, count)
+
+    # Send individual listings with tracker buttons (everyone gets buttons now)
+    for listing in listings[:display_limit]:
+        await _send_trackable_listing(update.message, listing)
+        await asyncio.sleep(0.2)
+
+    if count > display_limit:
+        await update.message.reply_text(
+            f"<i>Showing {display_limit}/{count}. Narrow your filters for more relevant results.</i>",
             parse_mode="HTML",
         )
 
@@ -1735,8 +1734,27 @@ async def cmd_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_command(update.effective_chat.id, "company")
     if not context.args:
         await update.message.reply_text(
-            "🏢 <b>Company intel</b>\n\nUsage: <code>/company Allegro</code>",
+            "🏢 <b>Company intel</b>\n\n"
+            "Usage:\n"
+            "<code>/company Allegro</code> — intel on a specific company\n"
+            "<code>/company list</code> — top companies by number of offers",
             parse_mode="HTML",
+        )
+        return
+
+    if context.args[0].lower() == "list":
+        companies = await asyncio.to_thread(serving.top_hiring_companies, 20)
+        if not companies:
+            await update.message.reply_text("📭 No company data available yet.")
+            return
+        lines = ["🏢 <b>Top Companies by Offers</b>\n"]
+        for i, c in enumerate(companies, 1):
+            name = c.get("company_name", "?")
+            count = c.get("listing_count", 0)
+            lines.append(f"{i}. <b>{_esc(name)}</b> — {count} listings")
+        lines.append("\n<i>Use <code>/company Name</code> for details on any company.</i>")
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode="HTML", reply_markup=_premium_back_kb()
         )
         return
 
@@ -1762,90 +1780,8 @@ async def cmd_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Free personalization: save your skill set; /latest is ranked by % match."""
-    log_command(update.effective_chat.id, "myskills")
-    chat_id = update.effective_chat.id
-    config = load_config(chat_id)
-    args = context.args
-
-    if not args:
-        skills = config.get("skills", [])
-        current = ", ".join(skills) if skills else "none set"
-        await update.message.reply_text(
-            f"🧠 <b>Your skills:</b> {_esc(current)}\n\n"
-            "Add: <code>/myskills add Python Apache Airflow</code>\n"
-            "Remove: <code>/myskills remove SQL</code>\n"
-            "Browse: <code>/myskills list</code>\n"
-            "Clear all: <code>/myskills clear</code>\n\n"
-            "<i>🏆 This <b>ranks</b> your /latest results by % skill overlap — "
-            "it does NOT exclude listings. Use /tech to filter instead.</i>",
-            parse_mode="HTML",
-        )
-        return
-
-    if args[0].lower() == "clear":
-        config["skills"] = []
-        save_config(chat_id, config)
-        await update.message.reply_text("✅ Skills cleared")
-        return
-
-    if args[0].lower() == "list":
-        lines = ["<b>🧠 Skill suggestions (same as /tech list):</b>\n"]
-        for category, techs in TECH_CATEGORIES.items():
-            lines.append(f"{category}")
-            lines.append(f"  <code>{', '.join(techs)}</code>\n")
-        lines.append("<i>You can use any name — these are just suggestions.</i>")
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-        return
-
-    if args[0].lower() == "add":
-        if len(args) < 2:
-            await update.message.reply_text("Usage: /myskills add Python Docker")
-            return
-        args = args[1:]  # Strip "add", fall through to default additive logic below
-
-    if args[0].lower() == "remove":
-        if len(args) < 2:
-            await update.message.reply_text("Usage: /myskills remove Python Docker")
-            return
-        to_remove = _parse_tech_args(list(args[1:]))
-        to_remove_lower = {s.lower() for s in to_remove}
-        current = config.get("skills", [])
-        removed = [s for s in current if s.lower() in to_remove_lower]
-        config["skills"] = [s for s in current if s.lower() not in to_remove_lower]
-        save_config(chat_id, config)
-        if removed:
-            remaining = ", ".join(config["skills"]) if config["skills"] else "none"
-            await update.message.reply_text(
-                f"✅ Removed: {_esc(', '.join(removed))}\n🧠 Current: {_esc(remaining)}",
-                parse_mode="HTML",
-            )
-        else:
-            await update.message.reply_text("❌ None of those were in your skills.")
-        return
-
-    # Default: additive (no overwrite)
-    new_skills = _parse_tech_args(args)
-    # Deduplicate within the same message
-    seen: set[str] = set()
-    unique_new: list[str] = []
-    for s in new_skills:
-        if s.lower() not in seen:
-            seen.add(s.lower())
-            unique_new.append(s)
-    current = config.get("skills", [])
-    current_lower = {s.lower() for s in current}
-    added = [s for s in unique_new if s.lower() not in current_lower]
-    config["skills"] = current + added
-    save_config(chat_id, config)
-    if added:
-        await update.message.reply_text(
-            f"✅ Added: {_esc(', '.join(added))}\n"
-            f"🧠 All skills: {_esc(', '.join(config['skills']))}",
-            parse_mode="HTML",
-        )
-    else:
-        await update.message.reply_text("ℹ️ Those skills are already in your list.")
+    """Alias for /tech — kept for backward compatibility."""
+    await cmd_tech(update, context)
 
 
 def _listings_to_csv(listings: list[dict]) -> bytes:
