@@ -105,7 +105,7 @@ BOT_COMMANDS = [
     BotCommand("start", "Welcome + overview"),
     BotCommand("filters", "View & edit your filters"),
     BotCommand("tolerance", "Set mismatch tolerance"),
-    BotCommand("myskills", "Set your skills (ranks matches)"),
+    BotCommand("myskills", "Set your skills (ranks results)"),
     BotCommand("latest", "💎 Recent matching listings"),
     BotCommand("premium", "💎 Premium menu (analytics, tracker…)"),
     BotCommand("subscribe", "Premium tiers & pricing"),
@@ -241,12 +241,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 /latest — get recent matching listings 💎\n"
         "📋 /filters — view &amp; edit all filters\n"
         "⚙️ /tolerance — set mismatch tolerance\n"
-        "🧠 /myskills — save your skills (ranks /latest)\n"
+        "🧠 /myskills — save your skills (ranks results, no filtering)\n"
         "🔒 /privacy — data collection settings\n"
         "💬 /feedback — send a suggestion or bug report\n\n"
         "<b>Filter commands</b> (edit via /filters or directly):\n"
         "  /seniority — junior, mid, senior, lead\n"
-        "  /tech — technologies (or /tech list)\n"
+        "  /tech — filter by technology (or /tech list)\n"
         "  /category — job categories (or /category list)\n"
         "  /workplace — remote / hybrid / office\n"
         "  /employment — b2b / uop / zlecenie\n"
@@ -596,6 +596,50 @@ async def cmd_seniority(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Seniority → {display}", parse_mode="HTML")
 
 
+def _parse_tech_args(args: list[str]) -> list[str]:
+    """Parse technology arguments, correctly joining multi-word tech names.
+
+    Telegram splits command args by whitespace, so '/tech Apache Airflow Docker'
+    becomes ['Apache', 'Airflow', 'Docker']. This function greedily joins tokens
+    into known multi-word technology names from ALL_KNOWN_TECHS.
+
+    Strategy: try longest match first (3 words, then 2, then 1). Unknown
+    single-word tokens are kept as-is (users can type any tech name).
+    """
+    from telegram_bot.filters import ALL_KNOWN_TECHS
+
+    # Build a lookup of lowercase multi-word tech names → canonical name
+    multi_word_techs: dict[str, str] = {}
+    for tech in ALL_KNOWN_TECHS:
+        parts = tech.split()
+        if len(parts) > 1:
+            multi_word_techs[tech.lower()] = tech
+
+    result = []
+    i = 0
+    while i < len(args):
+        matched = False
+        # Try longest match first (up to 3 words)
+        for length in (3, 2):
+            if i + length <= len(args):
+                candidate = " ".join(args[i : i + length]).lower()
+                if candidate in multi_word_techs:
+                    result.append(multi_word_techs[candidate])
+                    i += length
+                    matched = True
+                    break
+        if not matched:
+            # Single token — use as-is (preserve user casing, or match known)
+            token = args[i]
+            # Try to match single-word known techs for canonical casing
+            known_match = next(
+                (t for t in ALL_KNOWN_TECHS if t.lower() == token.lower() and " " not in t), None
+            )
+            result.append(known_match if known_match else token)
+            i += 1
+    return result
+
+
 async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_command(update.effective_chat.id, "tech")
     args = context.args
@@ -621,19 +665,22 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         techs = config.get("technologies", [])
         current = ", ".join(techs) if techs else "any (no filter)"
         await update.message.reply_text(
-            f"💻 <b>Current:</b> {current}\n\n"
-            f"<b>Usage:</b> /tech Python SQL Docker React\n"
-            f"<b>Browse:</b> /tech list\n"
-            f"<b>Clear:</b> /tech clear",
+            f"💻 <b>Tech filter:</b> {current}\n\n"
+            f"<b>Usage:</b> <code>/tech Python SQL Docker</code>\n"
+            f"<b>Browse all:</b> /tech list\n"
+            f"<b>Clear:</b> /tech clear\n\n"
+            f"<i>🔍 This is a <b>filter</b>: only listings mentioning these "
+            f"technologies will appear. See /myskills for ranking without filtering.</i>",
             parse_mode="HTML",
         )
         return
 
     config = load_config(update.effective_chat.id)
-    config["technologies"] = list(args)
+    techs = _parse_tech_args(args)
+    config["technologies"] = techs
     save_config(update.effective_chat.id, config)
-    log_filter_choice(update.effective_chat.id, "technology", list(args))
-    await update.message.reply_text(f"✅ Technologies → {', '.join(args)}", parse_mode="HTML")
+    log_filter_choice(update.effective_chat.id, "technology", techs)
+    await update.message.reply_text(f"✅ Tech filter → {', '.join(techs)}", parse_mode="HTML")
 
 
 async def cmd_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -972,6 +1019,8 @@ async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• 3+ = very loose matching\n\n"
             f"<b>Example:</b> If you want Python + remote, but tolerance=1,\n"
             f"a listing with Python + hybrid will still appear.\n\n"
+            f"<b>⚠️ Note:</b> Seniority is always strict — tolerance never "
+            f"forgives a seniority mismatch.\n\n"
             f"<b>Usage:</b> /tolerance 1",
             parse_mode="HTML",
         )
@@ -1044,8 +1093,7 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"/latest failed: {e}")
         await update.message.reply_text(
-            "⚠️ Failed to fetch listings. Data source may be unavailable.\n"
-            "Try again later or check /stats.",
+            "⚠️ Failed to fetch listings. Data source may be unavailable.\n" "Try again later.",
         )
         return
 
@@ -1055,7 +1103,7 @@ async def cmd_latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Try:\n"
             "• Increase /tolerance\n"
             "• Broaden /tech or /category\n"
-            "• Check /stats — maybe no scrape has run yet",
+            "• Check /filters — maybe your criteria are too narrow",
         )
         return
 
@@ -1640,8 +1688,10 @@ async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🧠 <b>Your skills:</b> {_esc(current)}\n\n"
             "Set: <code>/myskills python sql airflow</code>\n"
+            "Browse suggestions: <code>/myskills list</code>\n"
             "Clear: <code>/myskills clear</code>\n\n"
-            "<i>Your /latest results get ranked by % overlap with these skills.</i>",
+            "<i>🏆 This <b>ranks</b> your /latest results by % skill overlap — "
+            "it does NOT exclude listings. Use /tech to filter instead.</i>",
             parse_mode="HTML",
         )
         return
@@ -1650,6 +1700,15 @@ async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
         config["skills"] = []
         save_config(chat_id, config)
         await update.message.reply_text("✅ Skills cleared")
+        return
+
+    if args[0].lower() == "list":
+        lines = ["<b>🧠 Skill suggestions (same as /tech list):</b>\n"]
+        for category, techs in TECH_CATEGORIES.items():
+            lines.append(f"{category}")
+            lines.append(f"  <code>{', '.join(techs)}</code>\n")
+        lines.append("<i>You can use any name — these are just suggestions.</i>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
         return
 
     skills = [s.strip() for s in " ".join(args).replace(",", " ").split() if s.strip()]

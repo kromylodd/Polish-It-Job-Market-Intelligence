@@ -29,7 +29,8 @@ def test_seniority_strict_mismatch():
     listing = {"seniority": "senior"}
     matches, mismatches = match_listing(listing, _cfg(seniorities=["junior"], tolerance=0))
     assert matches is False
-    assert mismatches == 1
+    # Seniority is now a hard filter — returned as -1 (rejected before tolerance)
+    assert mismatches == -1
 
 
 def test_seniority_match_is_case_insensitive():
@@ -39,19 +40,30 @@ def test_seniority_match_is_case_insensitive():
 
 
 def test_tolerance_allows_one_mismatch():
-    # Wants junior + Python, listing is senior (1 mismatch) but has Python.
-    listing = {"seniority": "senior", "technologies": ["Python"]}
-    cfg = _cfg(seniorities=["junior"], technologies=["Python"], tolerance=1)
+    # Tolerance forgives non-seniority dimensions. Seniority is a hard filter.
+    # Here: wants remote + Python, listing is office (1 mismatch) but has Python.
+    listing = {"workplace_type": "office", "technologies": ["Python"]}
+    cfg = _cfg(workplace_types=["remote"], technologies=["Python"], tolerance=1)
     matches, mismatches = match_listing(listing, cfg)
     assert mismatches == 1
     assert matches is True
+
+
+def test_seniority_mismatch_not_forgiven_by_tolerance():
+    # Even with tolerance=1, seniority mismatch rejects immediately.
+    listing = {"seniority": "senior", "technologies": ["Python"]}
+    cfg = _cfg(seniorities=["junior"], technologies=["Python"], tolerance=1)
+    matches, mismatches = match_listing(listing, cfg)
+    assert matches is False
+    assert mismatches == -1
 
 
 def test_tolerance_zero_rejects_same_listing():
     listing = {"seniority": "senior", "technologies": ["Python"]}
     cfg = _cfg(seniorities=["junior"], technologies=["Python"], tolerance=0)
     matches, mismatches = match_listing(listing, cfg)
-    assert mismatches == 1
+    # Seniority hard-rejects before tolerance check
+    assert mismatches == -1
     assert matches is False
 
 

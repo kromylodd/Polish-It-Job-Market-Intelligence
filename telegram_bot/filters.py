@@ -245,12 +245,14 @@ def match_listing(listing: dict[str, Any], config: dict) -> tuple[bool, int]:
     tolerance = config.get("tolerance", 1)
     mismatches = 0
 
-    # --- Seniority ---
+    # --- Seniority (HARD filter — tolerance does NOT apply) ---
+    # A user searching for internships should never see senior roles, even with
+    # high tolerance. Seniority mismatch = immediate rejection.
     seniorities = config.get("seniorities", [])
     if seniorities:
         listing_seniority = (listing.get("seniority") or "").lower()
         if listing_seniority not in seniorities:
-            mismatches += 1
+            return (False, -1)
 
     # --- Technologies ---
     technologies = config.get("technologies", [])
