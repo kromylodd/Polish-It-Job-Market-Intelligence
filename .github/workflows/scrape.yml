@@ -2,25 +2,25 @@ name: Daily Scrape
 
 on:
   schedule:
-    # Run at 03:00 UTC (05:00 Warsaw). This is deep off-peak for Databricks
-    # Free Edition (Americas nighttime), minimizing FEATURE_DISABLED throttle
-    # risk. Pipeline completes well before the fixed 08:00 Warsaw broadcast.
+    # Run at 03:00 UTC (05:00 Warsaw). Pipeline completes well before the
+    # fixed 08:00 Warsaw broadcast.
     - cron: "0 3 * * *"
   workflow_dispatch: # Allow manual trigger
 
 jobs:
-  scrape-and-upload:
+  scrape-and-deploy:
     runs-on: ubuntu-latest
     env:
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-      DATABRICKS_JOB_ID: ${{ secrets.DATABRICKS_JOB_ID }}
+      VM_HOST: ${{ secrets.VM_HOST }}
+      VM_USER: ${{ secrets.VM_USER }}
+      VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+      PIPELINE_DIR: ${{ secrets.PIPELINE_DIR || '/home/kromylodd/polish-it-job-market-intelligence' }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
@@ -31,109 +31,56 @@ jobs:
       - name: Run scraper
         run: python -m scraper.scraper
 
-      - name: Upload to Databricks Volume
+      - name: Verify scraper output
         run: |
-          # Upload the fixed-name raw JSON file to Unity Catalog Volume
           LATEST_FILE="data/raw_listings_latest.json"
           if [ ! -f "$LATEST_FILE" ]; then
             echo "No output file found — scraper may have failed"
             exit 1
           fi
-          echo "Uploading: $LATEST_FILE"
-          python -m scraper.uploader "$LATEST_FILE"
-
-      # Trigger Databricks Workflow via API (the sole trigger mechanism).
-      # file_arrival was removed from the job definition to prevent double-runs.
-      - name: Trigger Databricks Workflow and wait
-        if: success()
-        run: |
-          set -euo pipefail
-          if [ -z "${DATABRICKS_JOB_ID}" ]; then
-            echo "DATABRICKS_JOB_ID secret is not set" >&2
+          FILE_SIZE=$(stat -f%z "$LATEST_FILE" 2>/dev/null || stat --format=%s "$LATEST_FILE")
+          echo "Output file: $LATEST_FILE (${FILE_SIZE} bytes)"
+          if [ "$FILE_SIZE" -lt 1000 ]; then
+            echo "File suspiciously small — scraper may have returned empty data"
             exit 1
           fi
 
-          # Normalize host: ensure https:// scheme (the secret may store bare hostname)
-          DB_HOST="${DATABRICKS_HOST}"
-          DB_HOST="${DB_HOST#https://}"
-          DB_HOST="${DB_HOST#http://}"
-          DB_HOST="https://${DB_HOST%/}"
-          echo "Using Databricks host: ${DB_HOST}"
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "$VM_SSH_KEY" > ~/.ssh/vm_key
+          chmod 600 ~/.ssh/vm_key
+          # Add VM host key to known_hosts (avoids interactive prompt)
+          ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Trigger with retries — Free Edition sometimes returns FEATURE_DISABLED
-          # (HTTP 404) when the org is temporarily throttled. The throttle can
-          # outlast a short window, so retry up to 30 min before giving up.
-          TRIGGER_DEADLINE=$(( $(date +%s) + 1800 ))
-          TRIGGER_ATTEMPT=0
-          RUN_ID=""
-          while true; do
-            TRIGGER_ATTEMPT=$((TRIGGER_ATTEMPT + 1))
-            HTTP_CODE=$(curl -sS -o /tmp/trigger_resp.json -w "%{http_code}" \
-              -X POST "${DB_HOST}/api/2.1/jobs/run-now" \
-              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{\"job_id\": ${DATABRICKS_JOB_ID}}")
+      - name: SCP data to VM
+        run: |
+          scp -i ~/.ssh/vm_key -o StrictHostKeyChecking=no \
+            data/raw_listings_latest.json \
+            "${VM_USER}@${VM_HOST}:${PIPELINE_DIR}/data/raw_listings_latest.json"
+          echo "Uploaded data to VM"
 
-            if [ "$HTTP_CODE" = "200" ]; then
-              RUN_ID=$(python -c 'import sys,json; print(json.load(open("/tmp/trigger_resp.json"))["run_id"])')
-              break
-            fi
+      - name: Trigger pipeline on VM
+        run: |
+          ssh -i ~/.ssh/vm_key -o StrictHostKeyChecking=no \
+            "${VM_USER}@${VM_HOST}" \
+            "cd ${PIPELINE_DIR} && .venv-pipeline/bin/python -m pipeline.run_pipeline 2>&1" | tee /tmp/pipeline_output.log
+          echo "Pipeline completed"
 
-            RESP_BODY=$(cat /tmp/trigger_resp.json 2>/dev/null || echo "")
-            echo "Trigger attempt ${TRIGGER_ATTEMPT} failed (HTTP ${HTTP_CODE}): ${RESP_BODY}"
+      - name: Verify pipeline success
+        run: |
+          # Check pipeline output for success indicator
+          if grep -q "PIPELINE COMPLETE" /tmp/pipeline_output.log; then
+            echo "✅ Pipeline completed successfully"
+          else
+            echo "❌ Pipeline may have failed — check logs above"
+            exit 1
+          fi
 
-            # Retry on transient/throttle errors (429, 5xx, FEATURE_DISABLED 404)
-            if echo "$RESP_BODY" | grep -qi "FEATURE_DISABLED\|temporarily"; then
-              echo "Databricks org temporarily throttled — will retry..."
-            elif [ "$HTTP_CODE" -ge 500 ] || [ "$HTTP_CODE" = "429" ]; then
-              echo "Server error / rate limit — will retry..."
-            else
-              echo "Non-retryable error (HTTP ${HTTP_CODE}). Aborting." >&2
-              exit 1
-            fi
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/vm_key
 
-            if [ "$(date +%s)" -ge "$TRIGGER_DEADLINE" ]; then
-              echo "Timed out trying to trigger Databricks job (${TRIGGER_ATTEMPT} attempts over 30 min)" >&2
-              echo "The raw data was already uploaded to the Volume; the pipeline can be run manually from the Databricks UI once the org is un-throttled." >&2
-              exit 1
-            fi
-            BACKOFF=$(( 30 * TRIGGER_ATTEMPT ))
-            [ "$BACKOFF" -gt 120 ] && BACKOFF=120
-            echo "Waiting ${BACKOFF}s before retry..."
-            sleep "$BACKOFF"
-          done
-
-          echo "Triggered Databricks run_id=${RUN_ID}"
-
-          # Poll run status until terminal (max ~20 min).
-          DEADLINE=$(( $(date +%s) + 1200 ))
-          while true; do
-            RESP=$(curl -sS --fail-with-body \
-              -H "Authorization: Bearer ${DATABRICKS_TOKEN}" \
-              "${DB_HOST}/api/2.1/jobs/runs/get?run_id=${RUN_ID}")
-            LIFECYCLE=$(echo "$RESP" | python -c 'import sys,json; print(json.load(sys.stdin)["state"]["life_cycle_state"])')
-            RESULT=$(echo "$RESP" | python -c 'import sys,json; print(json.load(sys.stdin)["state"].get("result_state",""))')
-            echo "run ${RUN_ID}: ${LIFECYCLE} ${RESULT}"
-            case "$LIFECYCLE" in
-              TERMINATED|SKIPPED|INTERNAL_ERROR)
-                if [ "$RESULT" != "SUCCESS" ]; then
-                  echo "Databricks run did not succeed (result=${RESULT})" >&2
-                  exit 1
-                fi
-                break
-                ;;
-            esac
-            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-              echo "Timed out waiting for Databricks run ${RUN_ID}" >&2
-              exit 1
-            fi
-            sleep 20
-          done
-
-  # NOTE: Telegram broadcast is now decoupled from this pipeline.
+  # NOTE: Telegram broadcast is decoupled from this pipeline.
   # The bot (running 24/7 on the VM) sends daily alerts at exactly 08:00 Warsaw,
-  # reading from whatever data was last synced. This eliminates timing jitter and
-  # means users always get their digest at a predictable time regardless of how
-  # long the pipeline takes or whether Databricks was throttled.
-  # The Databricks notebook 04_alert_telegram remains as a secondary idempotent
-  # path (deduped via telegram_alerts_sent table).
+  # reading from whatever data was last processed by the pipeline.

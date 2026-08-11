@@ -52,8 +52,8 @@ select
     l.category,
     l.company_name,
     l.posted_date,
-    collect_set(bt.technology_name) as technologies,
-    collect_set(bc.city_name) as cities
+    list(distinct bt.technology_name) filter (where bt.technology_name is not null) as technologies,
+    list(distinct bc.city_name) filter (where bc.city_name is not null) as cities
 from listings l
 left join {{ ref('bridge_listing_technology') }} bt on bt.listing_id = l.listing_id
 left join {{ ref('bridge_listing_city') }} bc on bc.listing_id = l.listing_id

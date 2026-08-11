@@ -8,9 +8,10 @@
 with listing_cities as (
     select
         listing_id,
-        explode(cities) as city_name
+        unnest(cities) as city_name
     from {{ ref('stg_listings') }}
     where cities is not null
+      and len(cities) > 0
 ),
 
 final as (

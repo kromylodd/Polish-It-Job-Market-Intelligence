@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily pipeline timer (fallback if GitHub Actions trigger fails)
+
+[Timer]
+# Run at 04:00 UTC (06:00 Warsaw) — 1 hour after the scrape cron (03:00 UTC).
+# This is a safety net: the primary trigger is GitHub Actions SSH'ing in after
+# the scrape completes. If that fails, this timer ensures the pipeline still
+# runs with whatever data file is present.
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

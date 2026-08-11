@@ -1,10 +1,9 @@
 """
-Telegram notification sender (GitHub Actions path).
+Telegram notification sender (local pipeline path).
 
-Queries gold mart via databricks-sql-connector and sends each subscribed user
+Queries gold mart from the local pipeline DuckDB and sends each subscribed user
 the listings that match *their* filters. Uses a per-(listing, chat) idempotency
-log (job_market.gold.telegram_alerts_sent) so this and the Databricks notebook
-path can both run unconditionally without producing duplicate alerts, and so a
+log (stored locally in the same DuckDB) so runs are safe to repeat, and so a
 crash mid-run doesn't re-notify users who were already messaged.
 
 The recipient list + per-user filters come from telegram_bot/user_config.json
@@ -20,6 +19,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 import requests
@@ -31,13 +31,21 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST", "")
-DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
-DATABRICKS_WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-ALERTS_SENT_TABLE = "job_market.gold.telegram_alerts_sent"
+# Local pipeline DuckDB — same file the pipeline writes to.
+# The bot reads it with read_only=True so it doesn't block the pipeline.
+PIPELINE_DB_PATH = Path(
+    os.environ.get(
+        "PIPELINE_DB_PATH",
+        str(Path(__file__).parent.parent / "pipeline.duckdb"),
+    )
+)
+
+# Idempotency table — stored in the pipeline DuckDB under a metadata schema.
+ALERTS_SCHEMA = "meta"
+ALERTS_SENT_TABLE = f"{ALERTS_SCHEMA}.telegram_alerts_sent"
 
 # Max listings to send to a single user per run (free-tier default). Paid users
 # get a larger cap, published per-user as ``max_listings`` in the shared config
@@ -45,13 +53,31 @@ ALERTS_SENT_TABLE = "job_market.gold.telegram_alerts_sent"
 MAX_PER_USER = 20
 
 
+def _get_duckdb_connection(read_only: bool = True):
+    """Open a DuckDB connection to the pipeline database."""
+    try:
+        import duckdb
+    except ImportError:
+        logger.error("duckdb not installed; cannot read pipeline data")
+        return None
+
+    if not PIPELINE_DB_PATH.exists():
+        logger.error("Pipeline database not found: %s", PIPELINE_DB_PATH)
+        return None
+
+    try:
+        return duckdb.connect(str(PIPELINE_DB_PATH), read_only=read_only)
+    except Exception as e:
+        logger.error("Failed to open pipeline database: %s", e)
+        return None
+
+
 def load_all_user_configs() -> dict[str, dict]:
     """Return {chat_id: config} for every subscriber, merged over defaults.
 
     Preference order:
-      1. The shared Databricks Volume (published by the bot) — the real source.
-      2. A local user_config.json (e.g. when running on the bot host).
-      3. Fallback: default filters sent to the admin chat (TELEGRAM_CHAT_ID).
+      1. A local user_config.json (e.g. when running on the bot host).
+      2. Fallback: default filters sent to the admin chat (TELEGRAM_CHAT_ID).
     """
 
     def _with_defaults(cfg: dict) -> dict:
@@ -59,7 +85,7 @@ def load_all_user_configs() -> dict[str, dict]:
         merged.update(cfg)
         return merged
 
-    store = config_store.download_from_volume() or config_store.load_local()
+    store = config_store.load_local()
     if store:
         return {cid: _with_defaults(cfg) for cid, cfg in store.items() if isinstance(cfg, dict)}
 
@@ -69,38 +95,20 @@ def load_all_user_configs() -> dict[str, dict]:
     return {}
 
 
-def get_sql_connection():
-    """Create a Databricks SQL connection."""
-    from databricks import sql
-
-    return sql.connect(
-        server_hostname=DATABRICKS_HOST.replace("https://", ""),
-        http_path=f"/sql/1.0/warehouses/{DATABRICKS_WAREHOUSE_ID}",
-        access_token=DATABRICKS_TOKEN,
-    )
-
-
-def ensure_alerts_sent_table(conn):
-    """Create the idempotency log table, migrating older single-column layouts."""
-    with conn.cursor() as cursor:
-        cursor.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {ALERTS_SENT_TABLE} (
-                listing_id STRING,
-                chat_id STRING,
-                sent_at TIMESTAMP
-            )
-            USING DELTA
-        """
+def ensure_alerts_sent_table(con):
+    """Create the idempotency log table if it doesn't exist."""
+    con.execute(f"CREATE SCHEMA IF NOT EXISTS {ALERTS_SCHEMA}")
+    con.execute(f"""
+        CREATE TABLE IF NOT EXISTS {ALERTS_SENT_TABLE} (
+            listing_id VARCHAR NOT NULL,
+            chat_id VARCHAR NOT NULL,
+            sent_at TIMESTAMP DEFAULT current_timestamp,
+            PRIMARY KEY (listing_id, chat_id)
         )
-        # Older tables were (listing_id, sent_at); add chat_id if it's missing.
-        try:
-            cursor.execute(f"ALTER TABLE {ALERTS_SENT_TABLE} ADD COLUMNS (chat_id STRING)")
-        except Exception:
-            pass  # Column already exists — expected on the happy path.
+    """)
 
 
-def query_recent_listings(conn) -> list[dict]:
+def query_recent_listings(con) -> list[dict]:
     """Query the gold mart snapshot of active listings.
 
     We intentionally do NOT filter by ``posted_date``: justjoin's posted_date is
@@ -108,46 +116,72 @@ def query_recent_listings(conn) -> list[dict]:
     almost nothing. Novelty ("what to alert") is defined by the per-(listing, chat)
     idempotency log instead, so each user is alerted about a given listing once.
     """
-    query = """
-        SELECT listing_id, title, slug, company_name, seniority,
-               employment_type, workplace_type, category,
-               salary_min, salary_max, currency,
-               posted_date, technologies, cities
-        FROM job_market.gold.mart_market_snapshot
-        ORDER BY posted_date DESC
-        LIMIT 500
-    """
+    try:
+        result = con.execute("""
+            SELECT listing_id, title, slug, company_name, seniority,
+                   employment_type, workplace_type, category,
+                   salary_min, salary_max, currency,
+                   posted_date, technologies, cities
+            FROM gold.mart_market_snapshot
+            ORDER BY posted_date DESC
+            LIMIT 500
+        """).fetchall()
 
-    with conn.cursor() as cursor:
-        cursor.execute(query)
-        columns = [desc[0] for desc in cursor.description]
-        return [_normalize_row(dict(zip(columns, row))) for row in cursor.fetchall()]
+        columns = [
+            "listing_id",
+            "title",
+            "slug",
+            "company_name",
+            "seniority",
+            "employment_type",
+            "workplace_type",
+            "category",
+            "salary_min",
+            "salary_max",
+            "currency",
+            "posted_date",
+            "technologies",
+            "cities",
+        ]
+        return [_normalize_row(dict(zip(columns, row))) for row in result]
+    except Exception as e:
+        logger.error("Failed to query market_snapshot: %s", e)
+        return []
 
 
 def _normalize_row(row: dict) -> dict:
-    """Convert array columns (returned as numpy arrays by the SQL connector) to
-    plain Python lists so downstream filtering/formatting behaves correctly."""
-    return {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in row.items()}
+    """Convert array columns (DuckDB lists) to plain Python lists and ensure
+    numeric types are floats so downstream formatting doesn't crash."""
+    normalized = {}
+    for k, v in row.items():
+        if isinstance(v, (list, tuple)):
+            normalized[k] = list(v) if v else []
+        elif hasattr(v, "tolist"):
+            normalized[k] = v.tolist()
+        else:
+            normalized[k] = v
+    return normalized
 
 
-def get_already_sent_pairs(conn) -> set[tuple[str, str]]:
+def get_already_sent_pairs(con) -> set[tuple[str, str]]:
     """Return the set of (listing_id, chat_id) that have already been notified."""
-    with conn.cursor() as cursor:
-        cursor.execute(f"SELECT listing_id, chat_id FROM {ALERTS_SENT_TABLE}")
-        return {(row[0], row[1]) for row in cursor.fetchall()}
+    try:
+        result = con.execute(f"SELECT listing_id, chat_id FROM {ALERTS_SENT_TABLE}").fetchall()
+        return {(row[0], row[1]) for row in result}
+    except Exception:
+        return set()
 
 
-def record_sent(conn, pairs: list[tuple[str, str]]):
-    """Insert (listing_id, chat_id) pairs into the idempotency log (parameterized)."""
+def record_sent(con, pairs: list[tuple[str, str]]):
+    """Insert (listing_id, chat_id) pairs into the idempotency log."""
     if not pairs:
         return
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    with conn.cursor() as cursor:
-        cursor.executemany(
-            f"INSERT INTO {ALERTS_SENT_TABLE} (listing_id, chat_id, sent_at) "
-            f"VALUES (%(lid)s, %(cid)s, %(ts)s)",
-            [{"lid": lid, "cid": cid, "ts": now} for (lid, cid) in pairs],
-        )
+    con.executemany(
+        f"INSERT OR IGNORE INTO {ALERTS_SENT_TABLE} (listing_id, chat_id, sent_at) "
+        f"VALUES (?, ?, ?)",
+        [(lid, cid, now) for (lid, cid) in pairs],
+    )
 
 
 def format_listing(listing: dict) -> str:
@@ -164,10 +198,13 @@ def format_listing(listing: dict) -> str:
 
     salary_str = "Undisclosed"
     if listing.get("salary_min") and listing.get("salary_max"):
-        salary_str = (
-            f"{int(float(listing['salary_min']))}-{int(float(listing['salary_max']))} "
-            f"{listing.get('currency', 'PLN')} ({listing.get('employment_type', '')})"
-        )
+        try:
+            salary_str = (
+                f"{int(float(listing['salary_min']))}-{int(float(listing['salary_max']))} "
+                f"{listing.get('currency', 'PLN')} ({listing.get('employment_type', '')})"
+            )
+        except (ValueError, TypeError):
+            pass
 
     slug = listing.get("slug", "")
     link = f"\nhttps://justjoin.it/offers/{quote(str(slug), safe='')}" if slug else ""
@@ -250,23 +287,25 @@ def _cap_for(config: dict) -> int:
         return MAX_PER_USER
 
 
-def broadcast(conn) -> int:
+def broadcast(con) -> int:
     """Send each user their matching, not-yet-sent listings as combined messages.
 
     Instead of spamming one message per listing, all matches are batched into as
     few messages as possible (respecting Telegram's 4096-char limit).
     Returns total listings notified about.
     """
-    listings = query_recent_listings(conn)
+    listings = query_recent_listings(con)
     logger.info(f"Fetched {len(listings)} active listings from the mart")
 
-    already_sent = get_already_sent_pairs(conn)
+    already_sent = get_already_sent_pairs(con)
     user_configs = load_all_user_configs()
     if not user_configs:
         logger.warning("No recipients configured; nothing to send")
         return 0
 
     total_sent = 0
+    new_pairs: list[tuple[str, str]] = []
+
     for chat_id, config in user_configs.items():
         matches = filter_listings(listings, config)
         cap = _cap_for(config)
@@ -291,11 +330,21 @@ def broadcast(conn) -> int:
             send_message(chat_id, chunk)
             time.sleep(0.5)
 
-        # Record all as sent if delivery succeeded (even partial — avoids re-send).
-        sent_pairs = [(listing["listing_id"], str(chat_id)) for listing in to_send]
-        record_sent(conn, sent_pairs)
-        total_sent += len(sent_pairs)
-        logger.info(f"chat {chat_id}: sent {len(sent_pairs)} listings in {len(chunks)} message(s)")
+        # Record all as sent
+        pairs = [(listing["listing_id"], str(chat_id)) for listing in to_send]
+        new_pairs.extend(pairs)
+        total_sent += len(pairs)
+        logger.info(f"chat {chat_id}: sent {len(pairs)} listings in {len(chunks)} message(s)")
+
+    # Batch-write all sent records (use a write connection)
+    if new_pairs:
+        write_con = _get_duckdb_connection(read_only=False)
+        if write_con:
+            try:
+                record_sent(write_con, new_pairs)
+                write_con.commit()
+            finally:
+                write_con.close()
 
     return total_sent
 
@@ -304,40 +353,64 @@ def run_daily_broadcast() -> int:
     """Send the daily digest — called by the bot's 08:00 Warsaw scheduler.
 
     Decoupled from pipeline timing, so users get a predictable daily digest
-    regardless of when the scrape/Databricks run finished. It queries the gold
-    snapshot from the Databricks SQL *warehouse* (a warehouse query is not
-    subject to the Free-Edition job-trigger throttle that affects run-now; a cold
-    warehouse only adds start-up latency). Returns the number of listings sent.
+    regardless of when the scrape/pipeline run finished. Reads the gold snapshot
+    from the local pipeline DuckDB (instant, no network).
+    Returns the number of listings sent.
     """
-    if not all([TELEGRAM_BOT_TOKEN, DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_WAREHOUSE_ID]):
-        logger.error("Daily broadcast skipped: missing Telegram/Databricks configuration")
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("Daily broadcast skipped: TELEGRAM_BOT_TOKEN not set")
         return 0
-    conn = get_sql_connection()
+
+    con = _get_duckdb_connection(read_only=True)
+    if con is None:
+        logger.error("Daily broadcast skipped: cannot open pipeline database")
+        return 0
+
     try:
-        ensure_alerts_sent_table(conn)
-        return broadcast(conn)
+        # Ensure idempotency table exists (needs write access for first run)
+        write_con = _get_duckdb_connection(read_only=False)
+        if write_con:
+            try:
+                ensure_alerts_sent_table(write_con)
+                write_con.commit()
+            finally:
+                write_con.close()
+
+        return broadcast(con)
     finally:
-        conn.close()
+        con.close()
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    if not all([TELEGRAM_BOT_TOKEN, DATABRICKS_HOST, DATABRICKS_TOKEN]):
-        logger.error("Missing required environment variables")
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("Missing TELEGRAM_BOT_TOKEN")
         sys.exit(1)
 
-    if not DATABRICKS_WAREHOUSE_ID:
-        logger.error("DATABRICKS_WAREHOUSE_ID is required")
+    if not PIPELINE_DB_PATH.exists():
+        logger.error("Pipeline database not found: %s", PIPELINE_DB_PATH)
+        logger.error("Run the pipeline first: python -m pipeline.run_pipeline")
         sys.exit(1)
 
-    conn = get_sql_connection()
+    con = _get_duckdb_connection(read_only=True)
+    if con is None:
+        sys.exit(1)
+
     try:
-        ensure_alerts_sent_table(conn)
-        total = broadcast(conn)
+        # Ensure idempotency table exists
+        write_con = _get_duckdb_connection(read_only=False)
+        if write_con:
+            try:
+                ensure_alerts_sent_table(write_con)
+                write_con.commit()
+            finally:
+                write_con.close()
+
+        total = broadcast(con)
         logger.info(f"Done — {total} notifications sent")
     finally:
-        conn.close()
+        con.close()
 
 
 if __name__ == "__main__":

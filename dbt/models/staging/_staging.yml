@@ -3,10 +3,9 @@ version: 2
 sources:
   - name: silver
     schema: silver
-    database: job_market
     tables:
       - name: listings_with_tech
-        description: "PySpark-materialized silver table with canonicalized tech skills"
+        description: "Silver table with canonicalized tech skills (produced by pipeline/silver_tech_parse.py)"
         columns:
           - name: listing_id
             description: "Unique listing identifier from justjoin.it"

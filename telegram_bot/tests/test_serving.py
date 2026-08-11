@@ -8,17 +8,23 @@ import pytest
 @pytest.fixture
 def serving(tmp_path, monkeypatch):
     """Load serving.py pointed at a temp DuckDB file, seeded with sample marts."""
-    monkeypatch.setenv("SERVING_DB_PATH", str(tmp_path / "serving.duckdb"))
+    db_path = str(tmp_path / "pipeline.duckdb")
+    monkeypatch.setenv("PIPELINE_DB_PATH", db_path)
+    # Also set SERVING_DB_PATH for backward compat if any test uses it
+    monkeypatch.setenv("SERVING_DB_PATH", db_path)
     import telegram_bot.serving as serving_mod
 
     serving_mod = importlib.reload(serving_mod)
 
     duckdb = pytest.importorskip("duckdb")
-    con = duckdb.connect(str(tmp_path / "serving.duckdb"))
+    con = duckdb.connect(db_path)
 
-    # All columns VARCHAR to mirror how sync_marts stores them.
+    # Create the gold schema (matching pipeline output structure)
+    con.execute("CREATE SCHEMA IF NOT EXISTS gold")
+
+    # All columns VARCHAR to mirror how the pipeline stores them.
     con.execute(
-        "CREATE TABLE salary_by_technology AS SELECT * FROM (VALUES "
+        "CREATE TABLE gold.mart_salary_by_technology AS SELECT * FROM (VALUES "
         # B2B rows (period-normalized to monthly in the mart upstream).
         "('Python','junior','b2b','PLN','10','8000','12000','10000','9500','8000','11000','6000','15000'),"
         "('Python','senior','b2b','PLN','20','18000','26000','22000','21000','19000','24000','15000','30000'),"
@@ -31,7 +37,7 @@ def serving(tmp_path, monkeypatch):
         "min_salary,max_salary)"
     )
     con.execute(
-        "CREATE TABLE demand_by_technology AS SELECT * FROM (VALUES "
+        "CREATE TABLE gold.mart_demand_by_technology AS SELECT * FROM (VALUES "
         # Partial bootstrap week (global earliest) — must be dropped by tech_demand_trend.
         "('Python','2026','29','2026-07-13','3','0','3'),"
         "('Python','2026','30','2026-07-20','30','25','5'),"
@@ -40,14 +46,14 @@ def serving(tmp_path, monkeypatch):
         ") AS t(technology_name,year,week_of_year,week_start,listing_count,prev_week_count,wow_change)"
     )
     con.execute(
-        "CREATE TABLE tech_co_occurrence AS SELECT * FROM (VALUES "
+        "CREATE TABLE gold.mart_tech_co_occurrence AS SELECT * FROM (VALUES "
         "('Python','SQL','50'),"
         "('Airflow','Python','30'),"
         "('Java','Spring','40')"
         ") AS t(tech_a,tech_b,co_occurrence_count)"
     )
     con.execute(
-        "CREATE TABLE market_trends AS SELECT * FROM (VALUES "
+        "CREATE TABLE gold.mart_market_trends AS SELECT * FROM (VALUES "
         # Partial bootstrap day (global earliest) — must be dropped by market_trend.
         "('2026-07-31','30','7','2026','2','18000','2','18000'),"
         "('2026-08-01','31','8','2026','12','20000','60','19500'),"
@@ -56,7 +62,7 @@ def serving(tmp_path, monkeypatch):
         "rolling_7d_listings,rolling_7d_avg_salary)"
     )
     con.execute(
-        "CREATE TABLE market_snapshot AS SELECT * FROM (VALUES "
+        "CREATE TABLE gold.mart_market_snapshot AS SELECT * FROM (VALUES "
         "('l1','Junior Python Dev','Acme','jr-py','junior','b2b','remote','python','7000','9000','PLN','2026-08-01','Python, SQL','Warszawa'),"
         "('l2','Junior Data Analyst','Acme','jr-da','junior','b2b','hybrid','data','6000','8000','PLN','2026-08-01','SQL, Excel','Kraków'),"
         # Senior row proves the snapshot is all-seniorities now, not junior-only.
@@ -64,8 +70,6 @@ def serving(tmp_path, monkeypatch):
         ") AS t(listing_id,title,company_name,slug,seniority,employment_type,workplace_type,"
         "category,salary_min,salary_max,currency,posted_date,technologies,cities)"
     )
-    con.execute("CREATE TABLE _sync_meta (synced_at DOUBLE, tables VARCHAR)")
-    con.execute("INSERT INTO _sync_meta VALUES (2000000000.0, 'seeded')")
     con.close()
 
     return serving_mod

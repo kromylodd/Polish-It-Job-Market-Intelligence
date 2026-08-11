@@ -7,8 +7,10 @@ import pytest
 
 @pytest.fixture
 def modules(tmp_path, monkeypatch):
-    """Seed a DuckDB serving cache and return (serving, reports)."""
-    monkeypatch.setenv("SERVING_DB_PATH", str(tmp_path / "serving.duckdb"))
+    """Seed a DuckDB pipeline cache and return (serving, reports)."""
+    db_path = str(tmp_path / "pipeline.duckdb")
+    monkeypatch.setenv("PIPELINE_DB_PATH", db_path)
+    monkeypatch.setenv("SERVING_DB_PATH", db_path)
     import telegram_bot.serving as serving_mod
 
     serving_mod = importlib.reload(serving_mod)
@@ -17,9 +19,10 @@ def modules(tmp_path, monkeypatch):
     reports_mod = importlib.reload(reports_mod)
 
     duckdb = pytest.importorskip("duckdb")
-    con = duckdb.connect(str(tmp_path / "serving.duckdb"))
+    con = duckdb.connect(db_path)
+    con.execute("CREATE SCHEMA IF NOT EXISTS gold")
     con.execute(
-        "CREATE TABLE market_trends AS SELECT * FROM (VALUES "
+        "CREATE TABLE gold.mart_market_trends AS SELECT * FROM (VALUES "
         # Partial bootstrap day (global earliest) — dropped by market_trend.
         "('2026-07-25','30','7','2026','2','18000','2','18000'),"
         "('2026-08-01','31','8','2026','12','20000','60','19500'),"
@@ -28,7 +31,7 @@ def modules(tmp_path, monkeypatch):
         "rolling_7d_listings,rolling_7d_avg_salary)"
     )
     con.execute(
-        "CREATE TABLE market_snapshot AS SELECT * FROM (VALUES "
+        "CREATE TABLE gold.mart_market_snapshot AS SELECT * FROM (VALUES "
         "('l1','Junior Dev','Acme','s1','junior','b2b','remote','python','7000','9000','PLN','2026-08-01','Python','Warszawa'),"
         "('l2','Data Analyst','Acme','s2','junior','b2b','hybrid','data','6000','8000','PLN','2026-08-01','SQL','Kraków'),"
         "('l3','QA','Globex','s3','junior','b2b','office','testing','5000','7000','PLN','2026-08-01','Selenium','Gdańsk')"
@@ -36,7 +39,7 @@ def modules(tmp_path, monkeypatch):
         "category,salary_min,salary_max,currency,posted_date,technologies,cities)"
     )
     con.execute(
-        "CREATE TABLE demand_by_technology AS SELECT * FROM (VALUES "
+        "CREATE TABLE gold.mart_demand_by_technology AS SELECT * FROM (VALUES "
         # Partial bootstrap week (global earliest) — dropped by tech_demand_trend.
         "('Python','2026','30','2026-07-25','3','0','3'),"
         "('Python','2026','31','2026-08-01','30','25','5'),"
@@ -44,8 +47,6 @@ def modules(tmp_path, monkeypatch):
         "('SQL','2026','32','2026-08-08','22','20','2')"
         ") AS t(technology_name,year,week_of_year,week_start,listing_count,prev_week_count,wow_change)"
     )
-    con.execute("CREATE TABLE _sync_meta (synced_at DOUBLE, tables VARCHAR)")
-    con.execute("INSERT INTO _sync_meta VALUES (2000000000.0, 'seeded')")
     con.close()
 
     return serving_mod, reports_mod
@@ -60,6 +61,7 @@ def test_market_report_ready(modules):
 
 
 def test_market_report_not_ready(tmp_path, monkeypatch):
+    monkeypatch.setenv("PIPELINE_DB_PATH", str(tmp_path / "empty.duckdb"))
     monkeypatch.setenv("SERVING_DB_PATH", str(tmp_path / "empty.duckdb"))
     import telegram_bot.serving as serving_mod
 

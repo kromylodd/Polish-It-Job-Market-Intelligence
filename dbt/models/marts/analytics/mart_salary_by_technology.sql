@@ -38,9 +38,9 @@ select
     round(avg(salary_min), 0) as avg_salary_min,
     round(avg(salary_max), 0) as avg_salary_max,
     round(avg((salary_min + salary_max) / 2), 0) as avg_salary_mid,
-    round(percentile_approx((salary_min + salary_max) / 2, 0.5), 0) as median_salary,
-    round(percentile_approx((salary_min + salary_max) / 2, 0.25), 0) as p25_salary,
-    round(percentile_approx((salary_min + salary_max) / 2, 0.75), 0) as p75_salary,
+    round(quantile_cont((salary_min + salary_max) / 2, 0.5), 0) as median_salary,
+    round(quantile_cont((salary_min + salary_max) / 2, 0.25), 0) as p25_salary,
+    round(quantile_cont((salary_min + salary_max) / 2, 0.75), 0) as p75_salary,
     min(salary_min) as min_salary,
     max(salary_max) as max_salary
 from fact_with_tech

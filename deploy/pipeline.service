@@ -1,0 +1,16 @@
+[Unit]
+Description=Polish IT Job Market - Data pipeline (bronze → gold)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/kromylodd/polish-it-job-market-intelligence
+EnvironmentFile=/home/kromylodd/polish-it-job-market-intelligence/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PIPELINE_DB_PATH=/home/kromylodd/polish-it-job-market-intelligence/pipeline.duckdb
+ExecStart=/home/kromylodd/polish-it-job-market-intelligence/.venv-pipeline/bin/python -m pipeline.run_pipeline
+TimeoutStartSec=300
+# Log to journal so `journalctl --user -u pipeline` shows pipeline output
+StandardOutput=journal
+StandardError=journal

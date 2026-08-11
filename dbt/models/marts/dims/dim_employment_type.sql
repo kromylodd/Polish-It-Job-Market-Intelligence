@@ -5,12 +5,24 @@
     )
 }}
 
-with employment_types as (
-    select distinct
-        sv.col.employment_type as type
+with listings_with_indices as (
+    select
+        l.salary_variants,
+        unnest(range(0, json_array_length(l.salary_variants)::int)) as sv_idx
     from {{ ref('stg_listings') }} l
-    lateral view explode(l.salary_variants) sv
-    where sv.col.employment_type is not null and sv.col.employment_type != ''
+    where l.salary_variants is not null
+      and l.salary_variants != '[]'
+      and l.salary_variants != ''
+      and json_valid(l.salary_variants)
+      and json_array_length(l.salary_variants) > 0
+),
+
+employment_types as (
+    select distinct
+        json_extract_string(li.salary_variants, '$[' || li.sv_idx || '].employment_type') as type
+    from listings_with_indices li
+    where json_extract_string(li.salary_variants, '$[' || li.sv_idx || '].employment_type') is not null
+      and json_extract_string(li.salary_variants, '$[' || li.sv_idx || '].employment_type') != ''
 )
 
 select

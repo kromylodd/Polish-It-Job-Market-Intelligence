@@ -8,19 +8,21 @@
 with required_skills as (
     select
         listing_id,
-        explode(required_skills) as technology_name,
+        unnest(required_skills) as technology_name,
         'required' as requirement_type
     from {{ ref('stg_listings') }}
     where required_skills is not null
+      and len(required_skills) > 0
 ),
 
 nice_to_have_skills as (
     select
         listing_id,
-        explode(nice_to_have_skills) as technology_name,
+        unnest(nice_to_have_skills) as technology_name,
         'nice_to_have' as requirement_type
     from {{ ref('stg_listings') }}
     where nice_to_have_skills is not null
+      and len(nice_to_have_skills) > 0
 ),
 
 all_skills as (

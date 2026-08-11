@@ -1,26 +1,18 @@
 job_market:
-  target: ci
+  target: local
   outputs:
-    # Used by CI (GitHub Actions) for dbt parse — dummy values are fine since
-    # parse doesn't actually connect to a warehouse.
-    ci:
-      type: databricks
-      host: "{{ env_var('DATABRICKS_HOST', 'dummy-for-ci') }}"
-      http_path: "/sql/1.0/warehouses/dummy"
-      token: "{{ env_var('DATABRICKS_TOKEN', 'dummy-for-ci') }}"
-      catalog: job_market
+    # Local DuckDB — used by the self-hosted pipeline on the VM.
+    # Reads/writes to the same pipeline.duckdb file the bot serves from.
+    local:
+      type: duckdb
+      path: "{{ env_var('PIPELINE_DB_PATH', '../pipeline.duckdb') }}"
       schema: gold
+      threads: 1
 
-    # Used when running dbt inside Databricks workflow notebooks.
-    # Token-based auth against the SQL warehouse — required because dbt runs
-    # in a subprocess that doesn't have access to the notebook's Spark session.
-    # host and http_path are injected via env vars by run_dbt.py / run_dbt_test.py
-    # (DATABRICKS_HOST from the Spark conf, DATABRICKS_HTTP_PATH from the
-    # DATABRICKS_WAREHOUSE_ID secret). Nothing workspace-specific is hardcoded here.
-    databricks:
-      type: databricks
-      host: "{{ env_var('DATABRICKS_HOST', '') }}"
-      http_path: "{{ env_var('DATABRICKS_HTTP_PATH', '') }}"
-      token: "{{ env_var('DATABRICKS_TOKEN', '') }}"
-      catalog: job_market
+    # Used by CI (GitHub Actions) for dbt parse/compile — validates SQL without
+    # connecting. For dbt-duckdb this just needs a path (can be in-memory).
+    ci:
+      type: duckdb
+      path: ":memory:"
       schema: gold
+      threads: 1

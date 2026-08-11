@@ -11,6 +11,7 @@ build/
 
 # Virtual environments
 .venv/
+.venv-pipeline/
 venv/
 env/
 .conda/
@@ -58,6 +59,10 @@ telegram_bot/serving.duckdb
 telegram_bot/serving.duckdb.wal
 telegram_bot/tracker.db
 telegram_bot/payments.db
+
+# Pipeline database (runtime output — rebuilt from raw data by the pipeline)
+pipeline.duckdb
+pipeline.duckdb.wal
 
 # Data files (don't commit raw scraped data)
 data/

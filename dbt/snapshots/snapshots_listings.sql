@@ -10,14 +10,12 @@
 }}
 
 -- SCD2 on listing_status and salary changes.
--- Same pattern as Silesia's snapshots_listings.sql.
 -- Lets us compute listing lifetime and detect withdrawn/filled postings.
 --
 -- listing_status is derived from expiry_date so the SCD2 actually captures a
--- lifecycle transition (active -> expired). Previously it was a hardcoded
--- 'active', which meant the status check_col could never change.
--- salary_min/max/currency are derived from the salary_variants array, since
--- stg_listings stores salary as an array of variants, not scalar columns.
+-- lifecycle transition (active -> expired). salary_min/max are extracted from
+-- the JSON salary_variants array.
+-- Note: DuckDB json_extract returns values from the first element for simplicity.
 
 select
     listing_id,
@@ -26,14 +24,12 @@ select
     category,
     seniority,
     workplace_type,
-    array_min(transform(salary_variants, v -> v.salary_min)) as salary_min,
-    array_max(transform(salary_variants, v -> v.salary_max)) as salary_max,
-    case
-        when size(salary_variants) > 0 then element_at(salary_variants, 1).currency
-    end as currency,
+    try_cast(json_extract_string(salary_variants, '$[0].salary_min') as double) as salary_min,
+    try_cast(json_extract_string(salary_variants, '$[0].salary_max') as double) as salary_max,
+    json_extract_string(salary_variants, '$[0].currency') as currency,
     case
         when try_cast(expiry_date as timestamp) is not null
-             and try_cast(expiry_date as timestamp) < current_timestamp()
+             and try_cast(expiry_date as timestamp) < current_timestamp
         then 'expired'
         else 'active'
     end as listing_status,
