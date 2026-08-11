@@ -664,22 +664,7 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(args) < 2:
             await update.message.reply_text("Usage: /tech add Apache Airflow Docker")
             return
-        new_techs = _parse_tech_args(list(args[1:]))
-        config = load_config(update.effective_chat.id)
-        current = config.get("technologies", [])
-        current_lower = {t.lower() for t in current}
-        added = [t for t in new_techs if t.lower() not in current_lower]
-        config["technologies"] = current + added
-        save_config(update.effective_chat.id, config)
-        log_filter_choice(update.effective_chat.id, "technology", config["technologies"])
-        if added:
-            await update.message.reply_text(
-                f"✅ Added: {', '.join(added)}\n" f"💻 All: {', '.join(config['technologies'])}",
-                parse_mode="HTML",
-            )
-        else:
-            await update.message.reply_text("ℹ️ Those are already in your tech filter.")
-        return
+        args = args[1:]  # Strip "add", fall through to default additive logic below
 
     if args and args[0].lower() == "remove":
         if len(args) < 2:
@@ -707,8 +692,7 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = ", ".join(techs) if techs else "any (no filter)"
         await update.message.reply_text(
             f"💻 <b>Tech filter:</b> {current}\n\n"
-            f"<b>Set (overwrite):</b> <code>/tech Python SQL Docker</code>\n"
-            f"<b>Add:</b> <code>/tech add Apache Airflow</code>\n"
+            f"<b>Add:</b> <code>/tech add Python Docker</code>\n"
             f"<b>Remove:</b> <code>/tech remove Python</code>\n"
             f"<b>Browse all:</b> /tech list\n"
             f"<b>Clear:</b> /tech clear\n\n"
@@ -718,12 +702,22 @@ async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Bare args (no add/remove keyword) default to add behavior
     config = load_config(update.effective_chat.id)
-    techs = _parse_tech_args(args)
-    config["technologies"] = techs
+    new_techs = _parse_tech_args(args)
+    current = config.get("technologies", [])
+    current_lower = {t.lower() for t in current}
+    added = [t for t in new_techs if t.lower() not in current_lower]
+    config["technologies"] = current + added
     save_config(update.effective_chat.id, config)
-    log_filter_choice(update.effective_chat.id, "technology", techs)
-    await update.message.reply_text(f"✅ Tech filter → {', '.join(techs)}", parse_mode="HTML")
+    log_filter_choice(update.effective_chat.id, "technology", config["technologies"])
+    if added:
+        await update.message.reply_text(
+            f"✅ Added: {', '.join(added)}\n" f"💻 All: {', '.join(config['technologies'])}",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text("ℹ️ Those are already in your tech filter.")
 
 
 async def cmd_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1738,11 +1732,10 @@ async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = ", ".join(skills) if skills else "none set"
         await update.message.reply_text(
             f"🧠 <b>Your skills:</b> {_esc(current)}\n\n"
-            "Set (overwrite): <code>/myskills python sql airflow</code>\n"
-            "Add: <code>/myskills add Apache Airflow</code>\n"
-            "Remove: <code>/myskills remove sql</code>\n"
+            "Add: <code>/myskills add Python Apache Airflow</code>\n"
+            "Remove: <code>/myskills remove SQL</code>\n"
             "Browse: <code>/myskills list</code>\n"
-            "Clear: <code>/myskills clear</code>\n\n"
+            "Clear all: <code>/myskills clear</code>\n\n"
             "<i>🏆 This <b>ranks</b> your /latest results by % skill overlap — "
             "it does NOT exclude listings. Use /tech to filter instead.</i>",
             parse_mode="HTML",
@@ -1768,21 +1761,7 @@ async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(args) < 2:
             await update.message.reply_text("Usage: /myskills add Python Docker")
             return
-        new_skills = _parse_tech_args(list(args[1:]))
-        current = config.get("skills", [])
-        current_lower = {s.lower() for s in current}
-        added = [s for s in new_skills if s.lower() not in current_lower]
-        config["skills"] = current + added
-        save_config(chat_id, config)
-        if added:
-            await update.message.reply_text(
-                f"✅ Added: {_esc(', '.join(added))}\n"
-                f"🧠 All skills: {_esc(', '.join(config['skills']))}",
-                parse_mode="HTML",
-            )
-        else:
-            await update.message.reply_text("ℹ️ Those skills are already in your list.")
-        return
+        args = args[1:]  # Strip "add", fall through to default additive logic below
 
     if args[0].lower() == "remove":
         if len(args) < 2:
@@ -1804,14 +1783,21 @@ async def cmd_myskills(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ None of those were in your skills.")
         return
 
-    skills = _parse_tech_args(args)
-    config["skills"] = skills
+    # Default: additive (no overwrite)
+    new_skills = _parse_tech_args(args)
+    current = config.get("skills", [])
+    current_lower = {s.lower() for s in current}
+    added = [s for s in new_skills if s.lower() not in current_lower]
+    config["skills"] = current + added
     save_config(chat_id, config)
-    await update.message.reply_text(
-        f"✅ Skills saved: {_esc(', '.join(skills))}\n"
-        "Your /latest results are now ranked by match.",
-        parse_mode="HTML",
-    )
+    if added:
+        await update.message.reply_text(
+            f"✅ Added: {_esc(', '.join(added))}\n"
+            f"🧠 All skills: {_esc(', '.join(config['skills']))}",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text("ℹ️ Those skills are already in your list.")
 
 
 def _listings_to_csv(listings: list[dict]) -> bytes:
