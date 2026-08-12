@@ -32,3 +32,40 @@
   bot service) — see docs/architecture_decisions.md. Reason: Databricks Free
   Edition ToS explicitly prohibits commercial use, so once paying subscribers
   exist the pipeline serving them can't legally keep running there.
+- [ ] **`/analytics reset` — admin command to clear analytics data.** Add a
+  subcommand so `/analytics reset` wipes the command-popularity counters and
+  total-interactions count, allowing a fresh start. Should delete rows from
+  `events` and `filter_choices` tables (keep the `users` table intact so the
+  user count stays).
+- [ ] **Show user ID in `/privacy`.** Display the user's raw Telegram chat ID in
+  the `/privacy` message (it's already visible to the user in Telegram settings
+  and forwarded messages, so not a security concern). Useful so users can share
+  their ID with the admin for premium grants.
+- [ ] **`/givepremium <chat_id> [days|forever]` — admin command to grant premium.**
+  Admin-only command that activates Pro tier for a given chat_id. If `forever`
+  is passed, set expiry far in the future (e.g. 36500 days ≈ 100 years). If a
+  number is passed, grant that many days. Default: 30 days. Calls
+  `payments.activate(chat_id, "pro", days=N)`. Example:
+  `/givepremium 123456789 forever`.
+- [ ] **Bot visibility & SEO.** Improve discoverability:
+  - Set a clear BotFather short description and "About" text with keywords
+    (IT jobs Poland, praca IT Polska, justjoin.it tracker, etc.)
+  - Enable inline mode (even a stub) so the bot appears in Telegram search.
+  - Create a simple landing page (GitHub Pages or similar) with the bot's
+    @username, keywords, and a `tg://resolve?domain=BOT_USERNAME` link for
+    Google indexing.
+  - Add structured data (JSON-LD) and meta tags targeting "telegram bot IT jobs
+    Poland" queries.
+  - Submit the landing page URL to Google Search Console.
+- [ ] **Fix daily scrape workflow (GitHub Actions).** The `Set up SSH key` step
+  fails because `VM_HOST`, `VM_USER`, and `VM_SSH_KEY` secrets are empty/unset
+  in the repository. Root cause: secrets were never configured in the repo's
+  GitHub Settings → Secrets → Actions. Fix: add the three secrets via GitHub
+  web UI or `gh secret set`. Also verify `ssh-keyscan` doesn't silently fail
+  when `$VM_HOST` is empty (add a guard).
+- [ ] **Fix tracker menu (`/mytracker`) not showing all tracked offers.** The
+  menu currently renders only the first 40 entries (`apps[:40]`). If a user has
+  more, the rest are invisible. Additionally, the menu is flat (no
+  pagination/filtering by status). Fix: add status-filter buttons
+  (All / Applied / Interested / Rejected) and paginate (10 per page, ◀️▶️
+  buttons), or at minimum bump the cap and inform the user of overflow.

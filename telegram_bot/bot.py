@@ -36,6 +36,8 @@ from pathlib import Path
 
 from telegram import (
     BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     LabeledPrice,
@@ -59,6 +61,7 @@ from telegram_bot.analytics import (
     is_opted_out,
     log_command,
     log_filter_choice,
+    reset_analytics,
     set_opt_out,
 )
 from telegram_bot.filters import (
@@ -112,6 +115,16 @@ BOT_COMMANDS = [
     BotCommand("feedback", "Send feedback to the maker"),
     BotCommand("privacy", "Privacy & data info"),
     BotCommand("help", "Show all commands"),
+]
+
+# Admin-only commands shown only in the admin's chat menu
+ADMIN_COMMANDS = BOT_COMMANDS + [
+    BotCommand("stats", "📊 Pipeline statistics"),
+    BotCommand("analytics", "📊 Usage analytics (reset)"),
+    BotCommand("refresh", "🔄 Force serving cache resync"),
+    BotCommand("givepremium", "🎁 Grant premium to user"),
+    BotCommand("revokepremium", "🚫 Revoke premium from user"),
+    BotCommand("refund", "↩️ Refund a Stars charge"),
 ]
 
 
@@ -1253,6 +1266,20 @@ async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_CHAT_ID:
         return
     log_command(update.effective_chat.id, "analytics")
+
+    # Handle /analytics reset — wipe events + filter_choices
+    args = context.args
+    if args and args[0].lower() == "reset":
+        result = await asyncio.to_thread(reset_analytics)
+        await update.message.reply_text(
+            "🗑️ <b>Analytics reset complete.</b>\n\n"
+            f"• Events deleted: {result['events_deleted']}\n"
+            f"• Filter choices deleted: {result['filter_choices_deleted']}\n\n"
+            "<i>User count preserved. Counters start fresh from now.</i>",
+            parse_mode="HTML",
+        )
+        return
+
     summary = get_analytics_summary()
 
     lines = ["<b>📊 Bot Usage Analytics</b>\n"]
@@ -1330,7 +1357,8 @@ async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "<b>🔒 Privacy &amp; Data Collection</b>\n\n"
-        f"<b>Your status:</b> {status}\n\n"
+        f"<b>Your status:</b> {status}\n"
+        f"<b>Your chat ID:</b> <code>{chat_id}</code>\n\n"
         "This bot collects <b>anonymous usage statistics</b> to understand "
         "what the Polish IT market needs and improve the service.\n\n"
         "<b>When enabled, we track:</b>\n"
@@ -1929,41 +1957,125 @@ async def cmd_rejected(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_mytracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _do_mytracker(context, update.effective_chat.id)
+    await _do_mytracker(context, update.effective_chat.id, status_filter=None, page=0)
 
 
-async def _do_mytracker(context, chat_id: int):
-    """Show the user's tracked applications."""
+_TRACKER_PAGE_SIZE = 10
+
+
+def _build_tracker_message(
+    apps: list[dict], c: dict[str, int], status_filter: str | None, page: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build paginated tracker text + navigation keyboard."""
+    icon = {"applied": "✅", "interested": "👀", "rejected": "❌"}
+    total = len(apps)
+    total_pages = max(1, (total + _TRACKER_PAGE_SIZE - 1) // _TRACKER_PAGE_SIZE)
+    page = min(page, total_pages - 1)
+
+    # Header with totals
+    filter_label = f" ({icon.get(status_filter, '')} {status_filter})" if status_filter else " (all)"
+    header = (
+        f"📋 <b>Your tracker</b>{filter_label} — "
+        f"✅ {c.get('applied', 0)} · 👀 {c.get('interested', 0)} · ❌ {c.get('rejected', 0)}\n"
+    )
+    lines = [header]
+
+    # Current page slice
+    start = page * _TRACKER_PAGE_SIZE
+    end = start + _TRACKER_PAGE_SIZE
+    for a in apps[start:end]:
+        title = a.get("title") or a.get("listing_id")
+        company = f" @ {html.escape(str(a['company']))}" if a.get("company") else ""
+        link = f"\n   {a['url']}" if a.get("url") else ""
+        lines.append(f"{icon.get(a['status'], '•')} {html.escape(str(title))}{company}{link}")
+
+    if total > _TRACKER_PAGE_SIZE:
+        lines.append(f"\n<i>Page {page + 1}/{total_pages} ({total} total)</i>")
+
+    # Build keyboard: status filter row + pagination row
+    sf = status_filter or "all"
+    filter_buttons = []
+    for label, val in [("All", "all"), ("✅", "applied"), ("👀", "interested"), ("❌", "rejected")]:
+        marker = "• " if sf == val else ""
+        filter_buttons.append(
+            InlineKeyboardButton(f"{marker}{label}", callback_data=f"trkpg:{val}:0")
+        )
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton("◀️ Prev", callback_data=f"trkpg:{sf}:{page - 1}")
+        )
+    if page < total_pages - 1:
+        nav_buttons.append(
+            InlineKeyboardButton("Next ▶️", callback_data=f"trkpg:{sf}:{page + 1}")
+        )
+
+    rows = [filter_buttons]
+    if nav_buttons:
+        rows.append(nav_buttons)
+
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _do_mytracker(
+    context, chat_id: int, *, status_filter: str | None = None, page: int = 0
+):
+    """Show the user's tracked applications (paginated)."""
     if not await _require_feature_chat(
         context, chat_id, payments.FEATURE_TRACKER, "Application tracker"
     ):
         return
     log_command(chat_id, "mytracker")
     c = await asyncio.to_thread(tracker.counts, chat_id)
-    apps = await asyncio.to_thread(tracker.list_applications, chat_id)
+    apps = await asyncio.to_thread(tracker.list_applications, chat_id, status_filter)
     if not apps:
+        msg = "📋 Your tracker is empty.\n" if not status_filter else f"📋 No <b>{status_filter}</b> offers.\n"
         await context.bot.send_message(
             chat_id,
-            "📋 Your tracker is empty.\n"
-            "Tap the buttons under /latest listings, or use /applied &lt;id&gt;.",
+            msg + "Tap the buttons under /latest listings, or use /applied &lt;id&gt;.",
             parse_mode="HTML",
         )
         return
 
-    icon = {"applied": "✅", "interested": "👀", "rejected": "❌"}
-    header = (
-        f"📋 <b>Your tracker</b> — "
-        f"✅ {c.get('applied', 0)} · 👀 {c.get('interested', 0)} · ❌ {c.get('rejected', 0)}\n"
-    )
-    lines = [header]
-    for a in apps[:40]:
-        title = a.get("title") or a.get("listing_id")
-        company = f" @ {_esc(a['company'])}" if a.get("company") else ""
-        link = f"\n   {a['url']}" if a.get("url") else ""
-        lines.append(f"{icon.get(a['status'], '•')} {_esc(title)}{company}{link}")
+    text, keyboard = _build_tracker_message(apps, c, status_filter, page)
     await context.bot.send_message(
-        chat_id, "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
+        chat_id, text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard
     )
+
+
+async def _callback_tracker_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle tracker pagination/filter buttons (trkpg:<status>:<page>)."""
+    query = update.callback_query
+    parts = query.data.split(":", 2)
+    if len(parts) != 3:
+        await query.answer()
+        return
+    _, status_str, page_str = parts
+    chat_id = query.message.chat.id
+
+    if not has_feature(chat_id, payments.FEATURE_TRACKER):
+        await query.answer("Premium feature — see /subscribe", show_alert=True)
+        return
+
+    status_filter = None if status_str == "all" else status_str
+    page = int(page_str) if page_str.isdigit() else 0
+
+    c = await asyncio.to_thread(tracker.counts, chat_id)
+    apps = await asyncio.to_thread(tracker.list_applications, chat_id, status_filter)
+
+    if not apps:
+        await query.answer("No offers with that status")
+        return
+
+    text, keyboard = _build_tracker_message(apps, c, status_filter, page)
+    await query.answer()
+    try:
+        await query.edit_message_text(
+            text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard
+        )
+    except Exception:
+        pass  # Message unchanged — Telegram raises if text is identical
 
 
 # --- Subscriptions (Telegram Stars) ---
@@ -2100,6 +2212,120 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Refunded {pay['stars']} ⭐ to chat {pay['chat_id']} and revoked {pay['tier']}."
     )
+
+
+
+async def cmd_givepremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: grant premium (Pro tier) to a user by chat_id.
+
+    Usage:
+      /givepremium <chat_id>           — 30 days (default)
+      /givepremium <chat_id> 90        — 90 days
+      /givepremium <chat_id> forever   — ~100 years (effectively permanent)
+    """
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    log_command(update.effective_chat.id, "givepremium")
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/givepremium &lt;chat_id&gt; [days|forever]</code>\n\n"
+            "Examples:\n"
+            "<code>/givepremium 123456789</code> — 30 days\n"
+            "<code>/givepremium 123456789 90</code> — 90 days\n"
+            "<code>/givepremium 123456789 forever</code> — permanent",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        target_chat_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ First argument must be a numeric chat ID.")
+        return
+
+    # Determine duration
+    days = 30  # default
+    duration_label = "30 days"
+    if len(args) > 1:
+        dur = args[1].lower()
+        if dur in ("forever", "permanent", "infinite", "навсегда"):
+            days = 36500  # ~100 years
+            duration_label = "forever ♾️"
+        else:
+            try:
+                days = int(dur)
+                duration_label = f"{days} days"
+            except ValueError:
+                await update.message.reply_text(
+                    "⚠️ Second argument must be a number of days or 'forever'."
+                )
+                return
+
+    expires = await asyncio.to_thread(payments.activate, target_chat_id, "pro", days=days)
+    exp_str = datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d")
+
+    # Notify the recipient (best-effort)
+    try:
+        await context.bot.send_message(
+            target_chat_id,
+            f"🎁 You've been granted <b>Pro</b> access ({duration_label})!\n"
+            f"Expires: {exp_str}\n\n"
+            "Enjoy all premium features — see /premium for the full menu.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass  # User may have blocked the bot
+
+    await update.message.reply_text(
+        f"✅ Granted <b>Pro</b> to <code>{target_chat_id}</code> for {duration_label}.\n"
+        f"   Expires: {exp_str}",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_revokepremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: revoke premium from a user by chat_id.
+
+    Usage: /revokepremium <chat_id>
+    """
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+    log_command(update.effective_chat.id, "revokepremium")
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/revokepremium &lt;chat_id&gt;</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        target_chat_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Argument must be a numeric chat ID.")
+        return
+
+    revoked = await asyncio.to_thread(payments.revoke_subscription, target_chat_id)
+    if revoked:
+        # Notify the user (best-effort)
+        try:
+            await context.bot.send_message(
+                target_chat_id,
+                "⚠️ Your premium access has been revoked by the admin.\n"
+                "You can re-subscribe anytime with /subscribe.",
+            )
+        except Exception:
+            pass
+        await update.message.reply_text(
+            f"✅ Revoked premium from <code>{target_chat_id}</code>.",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(
+            f"ℹ️ <code>{target_chat_id}</code> has no active subscription.",
+            parse_mode="HTML",
+        )
 
 
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2326,7 +2552,15 @@ async def _daily_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     """Register command menu with Telegram and seed config from the Volume."""
-    await application.bot.set_my_commands(BOT_COMMANDS)
+    # Default menu for all users
+    await application.bot.set_my_commands(
+        BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats()
+    )
+    # Extended menu for admin (includes admin-only commands)
+    if ADMIN_CHAT_ID:
+        await application.bot.set_my_commands(
+            ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=ADMIN_CHAT_ID)
+        )
 
     # On a fresh host with no local config, pull the last-published copy from the
     # Volume so users don't lose their filters when the bot moves machines.
@@ -2482,10 +2716,13 @@ def main():
     # Admin
     app.add_handler(CommandHandler("refresh", cmd_refresh))
     app.add_handler(CommandHandler("refund", cmd_refund))
+    app.add_handler(CommandHandler("givepremium", cmd_givepremium))
+    app.add_handler(CommandHandler("revokepremium", cmd_revokepremium))
 
     # Patterned callback routers MUST be registered before the catch-all filters
     # handler so tracker/subscribe/premium taps aren't swallowed by _callback_filters.
     app.add_handler(CallbackQueryHandler(_callback_tracker, pattern="^trk:"))
+    app.add_handler(CallbackQueryHandler(_callback_tracker_page, pattern="^trkpg:"))
     app.add_handler(CallbackQueryHandler(_callback_subscribe, pattern="^subtier:"))
     app.add_handler(CallbackQueryHandler(_callback_premium, pattern="^prem:"))
     app.add_handler(CallbackQueryHandler(_callback_filters))

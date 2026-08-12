@@ -165,6 +165,21 @@ def log_filter_choice(chat_id: int, dimension: str, values: list[str]):
     conn.commit()
 
 
+def reset_analytics() -> dict[str, int]:
+    """Delete all events and filter_choices rows (keeps users table intact).
+
+    Returns a dict with the number of deleted rows per table so the admin can
+    confirm the wipe.
+    """
+    conn = _get_conn()
+    ev = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    fc = conn.execute("SELECT COUNT(*) FROM filter_choices").fetchone()[0]
+    conn.execute("DELETE FROM events")
+    conn.execute("DELETE FROM filter_choices")
+    conn.commit()
+    return {"events_deleted": ev, "filter_choices_deleted": fc}
+
+
 def get_analytics_summary() -> dict:
     """Get aggregated analytics for the /analytics command."""
     conn = _get_conn()

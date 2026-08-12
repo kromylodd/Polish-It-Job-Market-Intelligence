@@ -47,6 +47,12 @@ jobs:
 
       - name: Set up SSH key
         run: |
+          # Guard: fail fast if SSH secrets are not configured
+          if [ -z "$VM_HOST" ] || [ -z "$VM_USER" ] || [ -z "$VM_SSH_KEY" ]; then
+            echo "❌ ERROR: One or more SSH secrets are empty."
+            echo "   Set VM_HOST, VM_USER, and VM_SSH_KEY in GitHub repo Settings → Secrets → Actions."
+            exit 1
+          fi
           mkdir -p ~/.ssh
           echo "$VM_SSH_KEY" > ~/.ssh/vm_key
           chmod 600 ~/.ssh/vm_key

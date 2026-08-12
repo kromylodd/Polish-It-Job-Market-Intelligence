@@ -367,6 +367,19 @@ def refund_payment(charge_id: str) -> dict | None:
             conn.close()
 
 
+def revoke_subscription(chat_id: int) -> bool:
+    """Revoke a user's subscription immediately. Returns True if a sub existed."""
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            cur = conn.execute("DELETE FROM subscriptions WHERE chat_id=?", (chat_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
 # --- Renewal reminders -----------------------------------------------------
 
 
