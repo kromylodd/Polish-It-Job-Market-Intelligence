@@ -11,8 +11,6 @@ to network issues.
 Design:
   * No sync needed: the pipeline (run_pipeline.py) populates the gold.* tables
     directly in pipeline.duckdb. The bot reads them with read_only=True.
-  * ``sync_marts()`` is kept as a no-op for backward compatibility (the bot's
-    scheduler may still call it). It returns immediately.
   * The query helpers read from gold.* tables in the pipeline DuckDB.
   * Everything degrades gracefully: if DuckDB isn't installed, or no pipeline
     run has happened yet, the helpers return None/empty and the caller shows
@@ -74,41 +72,6 @@ def _duckdb_connect(read_only: bool = True):
     except Exception as e:
         logger.warning("Could not open pipeline DB (%s): %s", SERVING_DB_PATH, e)
         return None
-
-
-# --------------------------------------------------------------------------- #
-# Sync (no-op after migration — kept for backward compatibility)
-# --------------------------------------------------------------------------- #
-MARTS: dict[str, str] = {
-    "salary_by_technology": _T_SALARY,
-    "market_trends": _T_TRENDS,
-    "tech_co_occurrence": _T_COOCCURRENCE,
-    "demand_by_technology": _T_DEMAND,
-    "city_summary": _T_CITY,
-    "market_snapshot": _T_SNAPSHOT,
-}
-
-
-def sync_marts(marts: dict[str, str] | None = None) -> dict[str, int]:
-    """No-op: the pipeline populates the DuckDB directly.
-
-    Kept for backward compatibility — the bot's startup/refresh code may call this.
-    Returns the current row counts as if a sync happened.
-    """
-    db = _duckdb_connect(read_only=True)
-    if db is None:
-        return {}
-    try:
-        result = {}
-        for local_name, qualified in (marts or MARTS).items():
-            try:
-                count = db.execute(f"SELECT count(*) FROM {qualified}").fetchone()[0]
-                result[local_name] = count
-            except Exception:
-                pass
-        return result
-    finally:
-        db.close()
 
 
 # --------------------------------------------------------------------------- #

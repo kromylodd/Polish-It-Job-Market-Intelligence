@@ -3,8 +3,14 @@ Telegram notification sender (local pipeline path).
 
 Queries gold mart from the local pipeline DuckDB and sends each subscribed user
 the listings that match *their* filters. Uses a per-(listing, chat) idempotency
-log (stored locally in the same DuckDB) so runs are safe to repeat, and so a
-crash mid-run doesn't re-notify users who were already messaged.
+log (stored in a dedicated SQLite DB owned by the bot, NOT the pipeline DuckDB)
+so runs are safe to repeat, and so a crash mid-run doesn't re-notify users who
+were already messaged.
+
+Keeping the idempotency log out of pipeline.duckdb matters for concurrency:
+DuckDB allows only a single read-write process, so writing bot state into the
+pipeline's analytical DB would collide with a running pipeline. The pipeline DB
+is therefore opened strictly read-only here.
 
 The recipient list + per-user filters come from telegram_bot/user_config.json
 ({chat_id: config}). If that file isn't available (e.g. a fresh CI checkout),
@@ -17,6 +23,7 @@ import html
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +31,7 @@ from urllib.parse import quote
 
 import requests
 
-from telegram_bot import config_store
+from telegram_bot import config_store, dbutil, payments
 from telegram_bot.filters import DEFAULT_USER_CONFIG, filter_listings
 
 logger = logging.getLogger(__name__)
@@ -43,14 +50,20 @@ PIPELINE_DB_PATH = Path(
     )
 )
 
-# Idempotency table — stored in the pipeline DuckDB under a metadata schema.
-ALERTS_SCHEMA = "meta"
-ALERTS_SENT_TABLE = f"{ALERTS_SCHEMA}.telegram_alerts_sent"
+# Idempotency log — a dedicated SQLite DB owned by the bot (NOT pipeline.duckdb).
+ALERTS_DB_PATH = Path(
+    os.environ.get(
+        "ALERTS_DB_PATH",
+        str(Path(__file__).parent / "alerts.db"),
+    )
+)
+_alerts_lock = threading.Lock()
 
-# Max listings to send to a single user per run (free-tier default). Paid users
-# get a larger cap, published per-user as ``max_listings`` in the shared config
-# by the bot (which owns payments.db); we read it here without needing that DB.
-MAX_PER_USER = 20
+# Max listings to send to a single user per run. Derived from the user's
+# subscription tier via payments.listing_cap() — the bot and the broadcast run on
+# the same host, so we read payments.db directly instead of stamping a cap into
+# the shared config file.
+MAX_PER_USER = payments.FREE_MAX_LISTINGS
 
 
 def _get_duckdb_connection(read_only: bool = True):
@@ -95,19 +108,56 @@ def load_all_user_configs() -> dict[str, dict]:
     return {}
 
 
-def ensure_alerts_sent_table(con):
-    """Create the idempotency log table if it doesn't exist."""
-    con.execute(f"CREATE SCHEMA IF NOT EXISTS {ALERTS_SCHEMA}")
-    con.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {ALERTS_SENT_TABLE} (
-            listing_id VARCHAR NOT NULL,
-            chat_id VARCHAR NOT NULL,
-            sent_at TIMESTAMP DEFAULT current_timestamp,
+def _init_alerts(conn):
+    """Create the SQLite idempotency log table if it doesn't exist."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS telegram_alerts_sent (
+            listing_id TEXT NOT NULL,
+            chat_id    TEXT NOT NULL,
+            sent_at    TEXT NOT NULL,
             PRIMARY KEY (listing_id, chat_id)
         )
-    """
+        """
     )
+    conn.commit()
+
+
+def get_already_sent_pairs() -> set[tuple[str, str]]:
+    """Return the set of (listing_id, chat_id) that have already been notified."""
+    try:
+        with dbutil.locked_connection(ALERTS_DB_PATH, _alerts_lock) as conn:
+            _init_alerts(conn)
+            rows = conn.execute("SELECT listing_id, chat_id FROM telegram_alerts_sent").fetchall()
+        return {(row[0], row[1]) for row in rows}
+    except Exception as e:
+        logger.error("Failed to read idempotency log: %s", e)
+        return set()
+
+
+def record_sent(pairs: list[tuple[str, str]]):
+    """Insert (listing_id, chat_id) pairs into the SQLite idempotency log."""
+    if not pairs:
+        return
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with dbutil.locked_connection(ALERTS_DB_PATH, _alerts_lock) as conn:
+        _init_alerts(conn)
+        conn.executemany(
+            "INSERT OR IGNORE INTO telegram_alerts_sent (listing_id, chat_id, sent_at) "
+            "VALUES (?, ?, ?)",
+            [(lid, cid, now) for (lid, cid) in pairs],
+        )
+        conn.commit()
+
+
+def alerts_sent_total() -> int:
+    """Total number of (listing, chat) notifications recorded (for /stats)."""
+    try:
+        with dbutil.locked_connection(ALERTS_DB_PATH, _alerts_lock) as conn:
+            _init_alerts(conn)
+            return conn.execute("SELECT COUNT(*) FROM telegram_alerts_sent").fetchone()[0]
+    except Exception:
+        return 0
 
 
 def query_recent_listings(con) -> list[dict]:
@@ -165,27 +215,6 @@ def _normalize_row(row: dict) -> dict:
         else:
             normalized[k] = v
     return normalized
-
-
-def get_already_sent_pairs(con) -> set[tuple[str, str]]:
-    """Return the set of (listing_id, chat_id) that have already been notified."""
-    try:
-        result = con.execute(f"SELECT listing_id, chat_id FROM {ALERTS_SENT_TABLE}").fetchall()
-        return {(row[0], row[1]) for row in result}
-    except Exception:
-        return set()
-
-
-def record_sent(con, pairs: list[tuple[str, str]]):
-    """Insert (listing_id, chat_id) pairs into the idempotency log."""
-    if not pairs:
-        return
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    con.executemany(
-        f"INSERT OR IGNORE INTO {ALERTS_SENT_TABLE} (listing_id, chat_id, sent_at) "
-        f"VALUES (?, ?, ?)",
-        [(lid, cid, now) for (lid, cid) in pairs],
-    )
 
 
 def format_listing(listing: dict) -> str:
@@ -300,13 +329,14 @@ def _tracker_markup(listing_id: str) -> dict | None:
     }
 
 
-def _cap_for(config: dict) -> int:
-    """Per-user listings cap: the bot stamps ``max_listings`` (from the user's
-    subscription tier) into the published config; free users fall back to the
-    default. Guards against corrupt values."""
+def _cap_for_chat(chat_id) -> int:
+    """Per-user listings cap, derived from the user's subscription tier.
+
+    Falls back to the free default for unknown/malformed chat ids or users with
+    no active subscription (payments.listing_cap already returns the free cap).
+    """
     try:
-        cap = int(config.get("max_listings", MAX_PER_USER))
-        return cap if cap > 0 else MAX_PER_USER
+        return payments.listing_cap(int(chat_id))
     except (TypeError, ValueError):
         return MAX_PER_USER
 
@@ -321,7 +351,7 @@ def broadcast(con) -> int:
     listings = query_recent_listings(con)
     logger.info(f"Fetched {len(listings)} active listings from the mart")
 
-    already_sent = get_already_sent_pairs(con)
+    already_sent = get_already_sent_pairs()
     user_configs = load_all_user_configs()
     if not user_configs:
         logger.warning("No recipients configured; nothing to send")
@@ -332,7 +362,7 @@ def broadcast(con) -> int:
 
     for chat_id, config in user_configs.items():
         matches = filter_listings(listings, config)
-        cap = _cap_for(config)
+        cap = _cap_for_chat(chat_id)
         to_send = [
             listing
             for listing in matches
@@ -375,15 +405,9 @@ def broadcast(con) -> int:
         total_sent += len(pairs)
         logger.info(f"chat {chat_id}: sent {len(pairs)} listings")
 
-    # Batch-write all sent records (use a write connection)
+    # Batch-write all sent records to the SQLite idempotency log.
     if new_pairs:
-        write_con = _get_duckdb_connection(read_only=False)
-        if write_con:
-            try:
-                record_sent(write_con, new_pairs)
-                write_con.commit()
-            finally:
-                write_con.close()
+        record_sent(new_pairs)
 
     return total_sent
 
@@ -406,15 +430,6 @@ def run_daily_broadcast() -> int:
         return 0
 
     try:
-        # Ensure idempotency table exists (needs write access for first run)
-        write_con = _get_duckdb_connection(read_only=False)
-        if write_con:
-            try:
-                ensure_alerts_sent_table(write_con)
-                write_con.commit()
-            finally:
-                write_con.close()
-
         return broadcast(con)
     finally:
         con.close()
@@ -437,15 +452,6 @@ def main():
         sys.exit(1)
 
     try:
-        # Ensure idempotency table exists
-        write_con = _get_duckdb_connection(read_only=False)
-        if write_con:
-            try:
-                ensure_alerts_sent_table(write_con)
-                write_con.commit()
-            finally:
-                write_con.close()
-
         total = broadcast(con)
         logger.info(f"Done — {total} notifications sent")
     finally:

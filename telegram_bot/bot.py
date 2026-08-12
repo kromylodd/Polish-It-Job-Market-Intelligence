@@ -32,6 +32,7 @@ import logging
 import os
 import threading
 import zoneinfo
+from collections import OrderedDict
 from pathlib import Path
 
 from telegram import (
@@ -99,19 +100,13 @@ BROADCAST_MINUTE = int(os.environ.get("BROADCAST_MINUTE", "0"))
 # Serializes read-modify-write cycles on the shared config file within this process.
 _config_lock = threading.Lock()
 
-# Coalesce bursts of filter edits into fewer Volume uploads.
-PUBLISH_DEBOUNCE_SECONDS = 5.0
-_publish_dirty = False
-_publish_task: asyncio.Task | None = None
-
 BOT_COMMANDS = [
     BotCommand("start", "Welcome + overview"),
     BotCommand("filters", "View & edit your filters"),
     BotCommand("tolerance", "Set mismatch tolerance"),
     BotCommand("tech", "Set your skills (filter + rank)"),
-    BotCommand("latest", "💎 Recent matching listings"),
-    BotCommand("premium", "💎 Premium menu (analytics, tracker…)"),
-    BotCommand("subscribe", "Premium tiers & pricing"),
+    BotCommand("latest", "Recent matching listings"),
+    BotCommand("premium", "📊 Analytics & tools menu"),
     BotCommand("feedback", "Send feedback to the maker"),
     BotCommand("privacy", "Privacy & data info"),
     BotCommand("help", "Show all commands"),
@@ -121,7 +116,6 @@ BOT_COMMANDS = [
 ADMIN_COMMANDS = BOT_COMMANDS + [
     BotCommand("stats", "📊 Pipeline statistics"),
     BotCommand("analytics", "📊 Usage analytics (reset)"),
-    BotCommand("refresh", "🔄 Force serving cache resync"),
     BotCommand("givepremium", "🎁 Grant premium to user"),
     BotCommand("revokepremium", "🚫 Revoke premium from user"),
     BotCommand("refund", "↩️ Refund a Stars charge"),
@@ -140,63 +134,11 @@ def load_config(chat_id: int) -> dict:
 
 
 def save_config(chat_id: int, config: dict):
-    """Persist a single user's config atomically, then mirror to the Volume."""
+    """Persist a single user's config atomically."""
     with _config_lock:
         all_configs = config_store.load_local()
         all_configs[str(chat_id)] = config
         config_store.save_local(all_configs)
-    _schedule_volume_publish()
-
-
-def _schedule_volume_publish():
-    """Request a (debounced, background) mirror of the local config to the Volume.
-
-    No-op when there's no running event loop (e.g. in tests) — the local file is
-    always authoritative, so skipping the mirror is safe.
-    """
-    global _publish_dirty, _publish_task
-    _publish_dirty = True
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    if _publish_task is None or _publish_task.done():
-        _publish_task = loop.create_task(_volume_publish_worker())
-
-
-async def _volume_publish_worker():
-    """Upload the local config to the Volume, coalescing rapid successive edits.
-
-    The published copy is enriched with each user's ``max_listings`` cap (derived
-    from their subscription tier) so the daily broadcast senders — which run in
-    GitHub Actions / Databricks and have no access to payments.db — can give paid
-    users a larger batch without querying the subscription store themselves.
-    """
-    global _publish_dirty
-    await asyncio.sleep(PUBLISH_DEBOUNCE_SECONDS)
-    while _publish_dirty:
-        _publish_dirty = False
-        snapshot = config_store.load_local()
-        enriched = _enrich_with_caps(snapshot)
-        ok = await asyncio.to_thread(config_store.upload_to_volume, enriched)
-        if not ok:
-            logger.debug("Volume publish skipped/failed; local copy remains authoritative")
-
-
-def _enrich_with_caps(snapshot: dict) -> dict:
-    """Return a copy of the config store with each user's listings cap stamped in.
-
-    Local file stays clean (derived field is only added to the uploaded copy).
-    """
-    enriched = copy.deepcopy(snapshot)
-    for chat_id, cfg in enriched.items():
-        if not isinstance(cfg, dict):
-            continue
-        try:
-            cfg["max_listings"] = payments.listing_cap(int(chat_id))
-        except (ValueError, TypeError):
-            cfg["max_listings"] = payments.FREE_MAX_LISTINGS
-    return enriched
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -231,17 +173,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "see /privacy.</i>"
     )
 
-    # Activate free trial for brand-new users
+    # New users: point them at the (now free) analytics commands.
     if is_new:
-        trial_expiry = payments.activate_trial(chat_id)
-        if trial_expiry is not None:
-            exp_str = datetime.datetime.fromtimestamp(trial_expiry, tz=WARSAW_TZ).strftime(
-                "%Y-%m-%d %H:%M"
-            )
-            text += (
-                f"\n\n🎁 <b>Welcome gift!</b> You have 24h of free Premium (Plus tier).\n"
-                f"Try /salary Python, /trend, /skills — expires {exp_str} (Warsaw)."
-            )
+        payments.activate_trial(chat_id)
+        text += (
+            "\n\n📊 <b>All analytics are free right now.</b>\n"
+            "Try /salary Python, /trend, /skills — or open /premium for the full menu."
+        )
 
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -265,7 +203,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /employment — b2b / uop / zlecenie\n"
         "  /salary — minimum salary\n"
         "  /city — location filter\n\n"
-        "<b>💎 Premium</b> — open the menu with /premium (or /subscribe):\n"
+        "<b>📊 Analytics &amp; tools</b> — open the menu with /premium:\n"
         "  /salary &lt;tech&gt; — salary by contract type (UoP vs B2B)\n"
         "  /trend [tech] — market &amp; demand trends\n"
         "  /skills &lt;tech&gt; — co-occurring technologies\n"
@@ -276,7 +214,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /mytracker — your tracked applications\n\n"
         "<i>Empty filters = no restriction on that dimension.\n"
         "Only active filters count toward tolerance.\n"
-        "Filters &amp; daily alerts are free; 💎 marks premium.</i>"
+        "All features are currently free for everyone.</i>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -299,7 +237,7 @@ def _premium_back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("💎 Premium Menu", callback_data="prem:home"),
+                InlineKeyboardButton("📊 Analytics Menu", callback_data="prem:home"),
                 InlineKeyboardButton("🎛️ Filters", callback_data="back_filters"),
             ]
         ]
@@ -1111,13 +1049,23 @@ async def cmd_tolerance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Tolerance → {tol} ({desc})")
 
 
+# Temporary flag: all former "premium" features are free for everyone while
+# the paid tier is paused. Flip back to False to re-enable the paywall — the
+# payment/subscription machinery underneath is left fully intact.
+PREMIUM_FREE = True
+
+
 def is_paid_user(chat_id: int) -> bool:
     """Whether a user has any active paid subscription (admin always counts)."""
+    if PREMIUM_FREE:
+        return True
     return chat_id == ADMIN_CHAT_ID or payments.is_subscribed(chat_id)
 
 
 def has_feature(chat_id: int, feature: str) -> bool:
     """Whether a user can use a premium feature (admin bypasses the paywall)."""
+    if PREMIUM_FREE:
+        return True
     return chat_id == ADMIN_CHAT_ID or payments.has_feature(chat_id, feature)
 
 
@@ -1421,124 +1369,65 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _save_feedback(chat_id: int, text: str):
-    """Save feedback to analytics DB."""
-    from datetime import datetime, timezone
+    """Save feedback to the analytics DB (preserved across /analytics reset)."""
+    from telegram_bot.analytics import log_feedback
 
-    from telegram_bot.analytics import _get_conn, _hash_user
-
-    conn = _get_conn()
-    now = datetime.now(timezone.utc).isoformat()
-    user_hash = _hash_user(chat_id)
-    conn.execute(
-        "INSERT INTO events (timestamp, user_hash, event_type, event_data) VALUES (?, ?, ?, ?)",
-        (now, user_hash, "feedback", text),
-    )
-    conn.commit()
+    log_feedback(chat_id, text)
 
 
 # --- Data helpers ---
 
 
 def _get_latest_listings(config: dict, limit: int = payments.FREE_MAX_LISTINGS) -> list[dict]:
-    """Try local DuckDB cache (fast), then Databricks, then local JSON files."""
-    # Fast path: use the locally-cached mart_market_snapshot (synced by JobQueue).
+    """Return filtered recent listings from the local gold mart, with a JSON fallback.
+
+    Primary source is the local DuckDB serving cache (the pipeline's gold mart).
+    If that isn't ready (no pipeline run yet, or DuckDB unavailable), fall back to
+    the most recent raw scrape file on disk so the bot still returns something.
+    """
     try:
         rows = _query_local_cache()
         if rows:
             return filter_listings(rows, config)[:limit]
     except Exception as e:
-        logger.debug(f"Local DuckDB cache unavailable: {e}")
-
-    # Slow path: Databricks SQL warehouse (cold start possible).
-    databricks_host = os.environ.get("DATABRICKS_HOST", "")
-    databricks_token = os.environ.get("DATABRICKS_TOKEN", "")
-    warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
-
-    if databricks_host and databricks_token and warehouse_id:
-        try:
-            return _query_databricks_latest(config, limit)
-        except Exception as e:
-            logger.warning(f"Databricks failed, using local JSON: {e}")
+        logger.warning("Local DuckDB cache read failed, falling back to JSON: %s", e)
 
     return _read_local_latest(config, limit)
 
 
 def _query_local_cache() -> list[dict] | None:
-    """Query the local DuckDB serving cache for market_snapshot rows."""
+    """Query the local DuckDB serving cache for gold market-snapshot rows.
+
+    Uses fetchall()/description (not fetchdf) so we don't require pandas at
+    runtime — the bot's dependencies are intentionally lean.
+    """
     if not serving.is_ready():
         return None
     import duckdb
 
     con = duckdb.connect(str(serving.SERVING_DB_PATH), read_only=True)
     try:
-        result = con.execute(
-            "SELECT * FROM market_snapshot ORDER BY posted_date DESC LIMIT 500"
-        ).fetchdf()
+        cur = con.execute(
+            "SELECT * FROM gold.mart_market_snapshot ORDER BY posted_date DESC LIMIT 500"
+        )
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     finally:
         con.close()
 
-    if result.empty:
+    if not rows:
         return None
 
-    rows = result.to_dict("records")
-    # Normalize numpy/pandas types to plain Python
+    # Normalize DuckDB arrays / numpy scalars to plain Python.
     for row in rows:
         for k, v in row.items():
-            if hasattr(v, "tolist"):
+            if isinstance(v, (list, tuple)):
+                row[k] = list(v)
+            elif hasattr(v, "tolist"):
                 row[k] = v.tolist()
             elif hasattr(v, "item"):
                 row[k] = v.item()
     return rows
-
-
-def _ondemand_sql_connect():
-    """Databricks SQL connection for on-demand user queries, with a SHORT retry.
-
-    The connector defaults to retrying a cold/unreachable warehouse for 900s. For
-    interactive commands (/latest, /export, /stats) that would freeze the handler
-    for up to 15 min and, if several stack up, exhaust the thread pool and make the
-    whole bot unresponsive. We cap it hard so these commands fail fast and fall
-    back to local data. Override via ONDEMAND_RETRY_SECONDS.
-    """
-    from databricks import sql
-
-    host = os.environ.get("DATABRICKS_HOST", "").replace("https://", "").strip().rstrip("/")
-    token = os.environ.get("DATABRICKS_TOKEN", "").strip()
-    warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID", "").strip()
-    retry_seconds = float(os.environ.get("ONDEMAND_RETRY_SECONDS", "25"))
-    return sql.connect(
-        server_hostname=host,
-        http_path=f"/sql/1.0/warehouses/{warehouse_id}",
-        access_token=token,
-        _retry_stop_after_attempts_count=3,
-        _retry_stop_after_attempts_duration=retry_seconds,
-        _socket_timeout=retry_seconds,
-    )
-
-
-def _query_databricks_latest(config: dict, limit: int = payments.FREE_MAX_LISTINGS) -> list[dict]:
-    """Query Databricks gold mart, apply filter logic in Python."""
-    query = """
-        SELECT listing_id, title, slug, company_name, seniority,
-               employment_type, workplace_type, category,
-               salary_min, salary_max, currency,
-               posted_date, technologies, cities
-        FROM job_market.gold.mart_market_snapshot
-        ORDER BY posted_date DESC
-        LIMIT 500
-    """
-
-    with _ondemand_sql_connect() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(query)
-            columns = [desc[0] for desc in cursor.description]
-            rows = [
-                {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in zip(columns, row)}
-                for row in cursor.fetchall()
-            ]
-
-    # Apply tolerance-based filter
-    return filter_listings(rows, config)[:limit]
 
 
 def _read_local_latest(config: dict, limit: int = payments.FREE_MAX_LISTINGS) -> list[dict]:
@@ -1575,30 +1464,34 @@ def _get_stats() -> dict:
         stats["last_scrape"] = "No data yet"
 
     try:
-        host = os.environ.get("DATABRICKS_HOST", "").replace("https://", "")
-        warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
-        token = os.environ.get("DATABRICKS_TOKEN", "")
-        if host and warehouse_id and token:
-            with _ondemand_sql_connect() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT COUNT(*) FROM job_market.gold.telegram_alerts_sent")
-                    stats["alerts_sent"] = cursor.fetchone()[0]
-        else:
-            stats["alerts_sent"] = "N/A (no DB)"
+        from telegram_bot import notify
+
+        stats["alerts_sent"] = notify.alerts_sent_total()
     except Exception:
-        stats["alerts_sent"] = "N/A (DB unavailable)"
+        stats["alerts_sent"] = "N/A"
 
     return stats
 
 
 # --- Premium commands ---
 
-# Small in-memory cache of recently shown listings so tracker inline buttons can
+# Small in-memory LRU of recently shown listings so tracker inline buttons can
 # recover a listing's title/company/url from just its id (kept out of callback
 # data, which is limited to 64 bytes). Lost on restart — harmless, since the
 # tracker row already persists the metadata captured at button-press time.
-_recent_listings: dict[str, dict] = {}
+# Ordered by recency of use (get + set both refresh) so a heavy user can't evict
+# another user's just-shown listing before they tap its button.
+_recent_listings: "OrderedDict[str, dict]" = OrderedDict()
 _RECENT_MAX = 2000
+
+
+def _recall_listing(lid: str) -> dict:
+    """Look up cached listing metadata by id, refreshing its recency. {} if absent."""
+    meta = _recent_listings.get(lid)
+    if meta is None:
+        return {}
+    _recent_listings.move_to_end(lid)
+    return meta
 
 
 def _esc(value: object) -> str:
@@ -1617,9 +1510,9 @@ def _remember_listing(listing: dict) -> str:
         "company": listing.get("company_name"),
         "url": url,
     }
-    if len(_recent_listings) > _RECENT_MAX:
-        for k in list(_recent_listings)[: _RECENT_MAX // 2]:
-            _recent_listings.pop(k, None)
+    _recent_listings.move_to_end(lid)
+    while len(_recent_listings) > _RECENT_MAX:
+        _recent_listings.popitem(last=False)  # evict least-recently-used
     return lid
 
 
@@ -1925,7 +1818,7 @@ async def _track_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     token = args[0]
     lid = _extract_listing_id(token)
-    meta = _recent_listings.get(lid, {})
+    meta = _recall_listing(lid)
     url = meta.get("url") or (token if token.startswith("http") else None)
     ok = await asyncio.to_thread(
         tracker.set_status,
@@ -1964,13 +1857,16 @@ _TRACKER_PAGE_SIZE = 10
 
 
 def _build_tracker_message(
-    apps: list[dict], c: dict[str, int], status_filter: str | None, page: int
+    page_rows: list[dict], c: dict[str, int], status_filter: str | None, page: int, total: int
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Build paginated tracker text + navigation keyboard."""
+    """Build paginated tracker text + navigation keyboard.
+
+    ``page_rows`` is already the current page's slice (from tracker.list_page);
+    ``total`` is the full count for the active filter.
+    """
     icon = {"applied": "✅", "interested": "👀", "rejected": "❌"}
-    total = len(apps)
     total_pages = max(1, (total + _TRACKER_PAGE_SIZE - 1) // _TRACKER_PAGE_SIZE)
-    page = min(page, total_pages - 1)
+    page = max(0, min(page, total_pages - 1))
 
     # Header with totals
     filter_label = (
@@ -1982,10 +1878,7 @@ def _build_tracker_message(
     )
     lines = [header]
 
-    # Current page slice
-    start = page * _TRACKER_PAGE_SIZE
-    end = start + _TRACKER_PAGE_SIZE
-    for a in apps[start:end]:
+    for a in page_rows:
         title = a.get("title") or a.get("listing_id")
         company = f" @ {html.escape(str(a['company']))}" if a.get("company") else ""
         link = f"\n   {a['url']}" if a.get("url") else ""
@@ -2023,9 +1916,12 @@ async def _do_mytracker(context, chat_id: int, *, status_filter: str | None = No
     ):
         return
     log_command(chat_id, "mytracker")
+    page = max(0, page)
     c = await asyncio.to_thread(tracker.counts, chat_id)
-    apps = await asyncio.to_thread(tracker.list_applications, chat_id, status_filter)
-    if not apps:
+    page_rows, total = await asyncio.to_thread(
+        tracker.list_page, chat_id, status_filter, _TRACKER_PAGE_SIZE, page * _TRACKER_PAGE_SIZE
+    )
+    if total == 0:
         msg = (
             "📋 Your tracker is empty.\n"
             if not status_filter
@@ -2038,7 +1934,7 @@ async def _do_mytracker(context, chat_id: int, *, status_filter: str | None = No
         )
         return
 
-    text, keyboard = _build_tracker_message(apps, c, status_filter, page)
+    text, keyboard = _build_tracker_message(page_rows, c, status_filter, page, total)
     await context.bot.send_message(
         chat_id, text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard
     )
@@ -2062,13 +1958,15 @@ async def _callback_tracker_page(update: Update, context: ContextTypes.DEFAULT_T
     page = int(page_str) if page_str.isdigit() else 0
 
     c = await asyncio.to_thread(tracker.counts, chat_id)
-    apps = await asyncio.to_thread(tracker.list_applications, chat_id, status_filter)
+    page_rows, total = await asyncio.to_thread(
+        tracker.list_page, chat_id, status_filter, _TRACKER_PAGE_SIZE, page * _TRACKER_PAGE_SIZE
+    )
 
-    if not apps:
+    if total == 0:
         await query.answer("No offers with that status")
         return
 
-    text, keyboard = _build_tracker_message(apps, c, status_filter, page)
+    text, keyboard = _build_tracker_message(page_rows, c, status_filter, page, total)
     await query.answer()
     try:
         await query.edit_message_text(
@@ -2083,6 +1981,14 @@ async def _callback_tracker_page(update: Update, context: ContextTypes.DEFAULT_T
 
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_command(update.effective_chat.id, "subscribe")
+    if PREMIUM_FREE:
+        await update.message.reply_text(
+            "📊 <b>Everything is free right now</b>\n\n"
+            "All analytics &amp; tools are currently open to everyone at no cost — "
+            "no subscription needed. Open /premium to use them.",
+            parse_mode="HTML",
+        )
+        return
     await _show_subscribe_menu(context, update.effective_chat.id)
 
 
@@ -2092,7 +1998,7 @@ async def _show_subscribe_menu(context, chat_id: int):
 
     lines = ["💎 <b>Premium tiers</b>\n"]
     if sub:
-        exp = datetime.datetime.fromtimestamp(sub["expires_at"]).strftime("%Y-%m-%d")
+        exp = datetime.datetime.fromtimestamp(sub["expires_at"], tz=WARSAW_TZ).strftime("%Y-%m-%d")
         if sub.get("in_grace"):
             lines.append(
                 f"⏳ <b>{payments.TIERS[sub['tier']]['name']}</b> expired {exp} — "
@@ -2146,8 +2052,18 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     if not tier:
         return
     chat_id = update.effective_chat.id
-    payments.record_payment(sp.telegram_payment_charge_id, chat_id, tier, sp.total_amount)
-    expires = payments.activate(chat_id, tier)
+    expires = payments.record_and_activate(
+        sp.telegram_payment_charge_id, chat_id, tier, sp.total_amount
+    )
+    if expires is None:
+        # Duplicate/redelivered payment event — already processed, don't re-grant.
+        logger.info(
+            "Duplicate successful_payment ignored: chat=%s charge_id=%s",
+            chat_id,
+            sp.telegram_payment_charge_id,
+        )
+        return
+    payments.invalidate_subscription_cache(chat_id)
     logger.info(
         "Payment ok: chat=%s tier=%s stars=%s charge_id=%s",
         chat_id,
@@ -2155,8 +2071,6 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         sp.total_amount,
         sp.telegram_payment_charge_id,
     )
-    # Republish config so the broadcast senders pick up this user's new cap.
-    _schedule_volume_publish()
     exp = datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d")
     await update.message.reply_text(
         f"🎉 <b>{payments.TIERS[tier]['name']}</b> is active until {exp}!\n\n"
@@ -2165,7 +2079,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     )
 
 
-# --- Admin: refresh the serving cache ---
+# --- Admin: refunds & grants ---
 
 
 async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2199,8 +2113,6 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Telegram refund failed: {e}")
         return
     await asyncio.to_thread(payments.refund_payment, charge_id)
-    # Republish config so the broadcast senders drop this user back to the free cap.
-    _schedule_volume_publish()
     try:
         await context.bot.send_message(
             int(pay["chat_id"]),
@@ -2327,23 +2239,6 @@ async def cmd_revokepremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: force a resync of the gold marts into the local serving cache."""
-    if update.effective_chat.id != ADMIN_CHAT_ID:
-        return
-    log_command(update.effective_chat.id, "refresh")
-    await update.message.reply_text("🔄 Syncing marts from Databricks…")
-    synced = await asyncio.to_thread(serving.sync_marts)
-    if synced:
-        body = "\n".join(f"• {t}: {n} rows" for t, n in synced.items())
-        await update.message.reply_text(f"✅ Serving cache refreshed:\n{body}")
-    else:
-        await update.message.reply_text(
-            "⚠️ Sync returned nothing. Check DATABRICKS_* env vars, that duckdb is "
-            "installed, and that Databricks is reachable."
-        )
-
-
 # --- Callback routers for premium inline buttons ---
 
 
@@ -2359,7 +2254,7 @@ async def _callback_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Premium feature — see /subscribe", show_alert=True)
         return
 
-    meta = _recent_listings.get(lid, {})
+    meta = _recall_listing(lid)
     await asyncio.to_thread(
         tracker.set_status,
         query.message.chat.id,
@@ -2404,16 +2299,27 @@ def _build_premium_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
     if chat_id == ADMIN_CHAT_ID:
         status = "👑 Admin (all features)"
     elif sub:
-        status = f"✅ {payments.TIERS[sub['tier']]['name']} active"
+        tier_name = payments.TIERS[sub["tier"]]["name"]
+        exp_dt = datetime.datetime.fromtimestamp(sub["expires_at"], tz=WARSAW_TZ)
+        exp_str = exp_dt.strftime("%Y-%m-%d")
+        days_left = (exp_dt - datetime.datetime.now(tz=WARSAW_TZ)).days
+        if sub.get("in_grace"):
+            status = (
+                f"⏳ {tier_name} expired {exp_str} — in grace period "
+                f"({payments.GRACE_DAYS}d), renew to keep access"
+            )
+        else:
+            days_txt = "expires today" if days_left <= 0 else f"{days_left}d left"
+            status = f"✅ {tier_name} active — expires {exp_str} ({days_txt})"
     else:
-        status = "🆓 Free tier — tap Subscribe to unlock 💎"
+        status = "📊 All analytics & tools are free right now"
 
     text = (
-        "💎 <b>Premium menu</b>\n"
+        "📊 <b>Analytics &amp; tools</b>\n"
         f"<i>{status}</i>\n\n"
-        "Analytics &amp; tools built on the live market data. Tap an item — the ones "
+        "Insights built on the live market data. Tap an item — the ones "
         "that need a keyword will show you how.\n\n"
-        "<i>Filters &amp; daily alerts stay free for everyone.</i>"
+        "<i>Filters &amp; daily alerts are free too.</i>"
     )
     keyboard = InlineKeyboardMarkup(
         [
@@ -2431,7 +2337,6 @@ def _build_premium_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
             ],
             [
                 InlineKeyboardButton("📋 My tracker", callback_data="prem:tracker"),
-                InlineKeyboardButton("💎 Subscribe", callback_data="prem:subscribe"),
             ],
         ]
     )
@@ -2559,29 +2464,12 @@ async def post_init(application: Application):
             ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=ADMIN_CHAT_ID)
         )
 
-    # On a fresh host with no local config, pull the last-published copy from the
-    # Volume so users don't lose their filters when the bot moves machines.
-    if not config_store.LOCAL_PATH.exists() and config_store.volume_enabled():
-        remote = await asyncio.to_thread(config_store.download_from_volume)
-        if remote:
-            config_store.save_local(remote)
-            logger.info("Seeded local user config from Volume (%d users)", len(remote))
-
     logger.info("Bot command menu registered")
 
-    # Keep the premium serving cache warm using the JobQueue: an initial sync on
-    # startup (only if the cache is stale) and a periodic refresh thereafter.
-    # sync_marts runs in a worker thread so it never blocks the event loop, and
-    # premium queries always hit the fast local DuckDB cache instead of a cold
-    # Databricks warehouse.
+    # Background jobs via the JobQueue. The pipeline writes the gold marts to the
+    # local DuckDB directly, so there's no serving-cache sync to schedule.
     jq = application.job_queue
     if jq is not None:
-        jq.run_once(_startup_sync_job, when=1)
-        jq.run_repeating(
-            _periodic_sync_job,
-            interval=SERVING_SYNC_INTERVAL_SECONDS,
-            first=SERVING_SYNC_INTERVAL_SECONDS,
-        )
         # Fixed daily broadcast at 08:00 Warsaw (decoupled from pipeline).
         jq.run_daily(
             _daily_broadcast_job,
@@ -2596,33 +2484,9 @@ async def post_init(application: Application):
         )
     else:
         logger.warning(
-            "JobQueue unavailable — serving cache won't auto-refresh. "
-            "Install python-telegram-bot[job-queue], or use the admin /refresh command."
+            "JobQueue unavailable — the daily broadcast and renewal reminders "
+            "won't run. Install python-telegram-bot[job-queue]."
         )
-
-
-# How often to refresh the serving cache in the background.
-SERVING_SYNC_INTERVAL_SECONDS = int(os.environ.get("SERVING_SYNC_INTERVAL_SECONDS", str(6 * 3600)))
-
-
-async def _startup_sync_job(context: ContextTypes.DEFAULT_TYPE):
-    """Sync the serving cache on startup, but only if it's missing/stale."""
-    try:
-        if serving.is_stale():
-            logger.info("Serving cache stale/missing — syncing marts on startup…")
-            synced = await asyncio.to_thread(serving.sync_marts)
-            logger.info("Startup mart sync: %s", synced or "nothing synced")
-    except Exception as e:
-        logger.warning("Startup mart sync failed: %s", e)
-
-
-async def _periodic_sync_job(context: ContextTypes.DEFAULT_TYPE):
-    """Refresh the serving cache on the background interval."""
-    try:
-        synced = await asyncio.to_thread(serving.sync_marts)
-        logger.info("Periodic mart sync: %s", synced or "nothing synced")
-    except Exception as e:
-        logger.warning("Periodic mart sync failed: %s", e)
 
 
 # How often to check for subscriptions needing a renewal nudge.
@@ -2711,7 +2575,6 @@ def main():
     app.add_handler(MessageHandler(tg_filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
 
     # Admin
-    app.add_handler(CommandHandler("refresh", cmd_refresh))
     app.add_handler(CommandHandler("refund", cmd_refund))
     app.add_handler(CommandHandler("givepremium", cmd_givepremium))
     app.add_handler(CommandHandler("revokepremium", cmd_revokepremium))
@@ -2725,7 +2588,11 @@ def main():
     app.add_handler(CallbackQueryHandler(_callback_filters))
 
     logger.info("Bot starting (long-polling)...")
-    app.run_polling(drop_pending_updates=True)
+    # IMPORTANT: do NOT drop pending updates. A successful_payment that arrives
+    # while the bot is restarting must still be processed, or the user is charged
+    # without being activated. Activation is idempotent (payments.record_and_activate
+    # is keyed on charge_id), so replaying a backlog is safe.
+    app.run_polling(drop_pending_updates=False)
 
 
 if __name__ == "__main__":

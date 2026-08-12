@@ -74,9 +74,11 @@ Environment=PYTHONUNBUFFERED=1
 Environment=MPLBACKEND=Agg
 Environment=PIPELINE_DB_PATH=${REPO_DIR}/pipeline.duckdb
 ExecStart=${REPO_DIR}/.venv/bin/python -m telegram_bot.bot
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStopSec=100
+# Create runtime files (SQLite stores) owner-only; they hold billing + user data.
+UMask=0077
 
 [Install]
 WantedBy=default.target
@@ -98,6 +100,7 @@ ExecStart=${REPO_DIR}/.venv-pipeline/bin/python -m pipeline.run_pipeline
 TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal
+UMask=0077
 EOF
 
 # 5c. Pipeline timer (daily fallback)

@@ -23,8 +23,10 @@ Group=botuser
 WorkingDirectory=/opt/polish-it-job-market-intelligence
 EnvironmentFile=/opt/polish-it-job-market-intelligence/.env
 ExecStart=/opt/polish-it-job-market-intelligence/.venv/bin/python -m telegram_bot.bot
-Restart=on-failure
+Restart=always
 RestartSec=5
+# Runtime files (SQLite stores with billing + user data) owner-only.
+UMask=0077
 # Basic hardening
 NoNewPrivileges=true
 PrivateTmp=true

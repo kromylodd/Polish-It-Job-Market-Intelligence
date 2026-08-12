@@ -38,7 +38,7 @@ jobs:
             echo "No output file found — scraper may have failed"
             exit 1
           fi
-          FILE_SIZE=$(stat -f%z "$LATEST_FILE" 2>/dev/null || stat --format=%s "$LATEST_FILE")
+          FILE_SIZE=$(stat -c%s "$LATEST_FILE")
           echo "Output file: $LATEST_FILE (${FILE_SIZE} bytes)"
           if [ "$FILE_SIZE" -lt 1000 ]; then
             echo "File suspiciously small — scraper may have returned empty data"

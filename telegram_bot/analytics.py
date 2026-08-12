@@ -13,7 +13,10 @@ No personally identifiable information is stored. Chat IDs are pseudonymized
 with a salted HMAC-SHA256 before storage so individual users cannot be
 identified (set ANALYTICS_SALT to a random secret).
 
-Storage: local SQLite database (telegram_bot/analytics.db).
+Storage: local SQLite database (telegram_bot/analytics.db). Connections are
+short-lived and guarded by a module lock (see telegram_bot/dbutil) — the same
+concurrency model as payments.py / tracker.py, so behaviour is consistent and
+the file is created with 0600 permissions.
 """
 
 import hashlib
@@ -24,6 +27,8 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+from telegram_bot import dbutil
 
 logger = logging.getLogger(__name__)
 
@@ -39,18 +44,15 @@ if not _ANALYTICS_SALT:
         "Set ANALYTICS_SALT to a random secret for real anonymization."
     )
 
-_local = threading.local()
+# Event type used for stored /feedback messages. These rows are preserved by
+# reset_analytics() (they're user-submitted content, not disposable counters).
+FEEDBACK_EVENT = "feedback"
+COMMAND_EVENT = "command"
+
+_lock = threading.Lock()
 
 
-def _get_conn() -> sqlite3.Connection:
-    """Get a thread-local SQLite connection."""
-    if not hasattr(_local, "conn"):
-        _local.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        _init_db(_local.conn)
-    return _local.conn
-
-
-def _init_db(conn: sqlite3.Connection):
+def _init_db(conn: sqlite3.Connection) -> None:
     """Create tables if they don't exist."""
     conn.executescript(
         """
@@ -94,150 +96,167 @@ def _hash_user(chat_id: int) -> str:
     ]
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# --- Internal helpers operating on an already-open connection ---------------
+# These take an explicit connection (and assume the caller holds the lock) so
+# public methods can compose them without re-acquiring the non-reentrant lock.
+
+
 def _ensure_user(conn: sqlite3.Connection, user_hash: str) -> bool:
     """Register user if not seen before. Returns True if new user."""
     row = conn.execute("SELECT 1 FROM users WHERE user_hash = ?", (user_hash,)).fetchone()
     if row:
         return False
-    now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT OR IGNORE INTO users (user_hash, first_seen, opted_out) VALUES (?, ?, 0)",
-        (user_hash, now),
+        (user_hash, _now()),
     )
     conn.commit()
     return True
 
 
-def is_opted_out(chat_id: int) -> bool:
-    """Check if a user has opted out of detailed tracking."""
-    conn = _get_conn()
-    user_hash = _hash_user(chat_id)
+def _is_opted_out(conn: sqlite3.Connection, user_hash: str) -> bool:
     row = conn.execute("SELECT opted_out FROM users WHERE user_hash = ?", (user_hash,)).fetchone()
     return bool(row and row[0])
 
 
-def set_opt_out(chat_id: int, opted_out: bool):
+# --- Public API -------------------------------------------------------------
+
+
+def is_opted_out(chat_id: int) -> bool:
+    """Check if a user has opted out of detailed tracking."""
+    with dbutil.locked_connection(DB_PATH, _lock) as conn:
+        _init_db(conn)
+        return _is_opted_out(conn, _hash_user(chat_id))
+
+
+def set_opt_out(chat_id: int, opted_out: bool) -> None:
     """Set user's opt-out preference."""
-    conn = _get_conn()
     user_hash = _hash_user(chat_id)
-    _ensure_user(conn, user_hash)
-    conn.execute(
-        "UPDATE users SET opted_out = ? WHERE user_hash = ?",
-        (1 if opted_out else 0, user_hash),
-    )
-    conn.commit()
+    with dbutil.locked_connection(DB_PATH, _lock) as conn:
+        _init_db(conn)
+        _ensure_user(conn, user_hash)
+        conn.execute(
+            "UPDATE users SET opted_out = ? WHERE user_hash = ?",
+            (1 if opted_out else 0, user_hash),
+        )
+        conn.commit()
 
 
-def log_command(chat_id: int, command: str):
-    """Log a command usage event. Respects opt-out (only counts user)."""
-    conn = _get_conn()
+def log_command(chat_id: int, command: str) -> bool:
+    """Log a command usage event. Respects opt-out (only counts user).
+
+    Returns True if this was the user's first-ever interaction (new user).
+    """
     user_hash = _hash_user(chat_id)
-    is_new = _ensure_user(conn, user_hash)
-
-    # If opted out, don't log command details
-    if is_opted_out(chat_id):
+    with dbutil.locked_connection(DB_PATH, _lock) as conn:
+        _init_db(conn)
+        is_new = _ensure_user(conn, user_hash)
+        if _is_opted_out(conn, user_hash):
+            return is_new
+        conn.execute(
+            "INSERT INTO events (timestamp, user_hash, event_type, event_data) "
+            "VALUES (?, ?, ?, ?)",
+            (_now(), user_hash, COMMAND_EVENT, command),
+        )
+        conn.commit()
         return is_new
 
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "INSERT INTO events (timestamp, user_hash, event_type, event_data) VALUES (?, ?, ?, ?)",
-        (now, user_hash, "command", command),
-    )
-    conn.commit()
-    return is_new
 
-
-def log_filter_choice(chat_id: int, dimension: str, values: list[str]):
+def log_filter_choice(chat_id: int, dimension: str, values: list[str]) -> None:
     """Log filter choices. Skipped if user opted out."""
     if not values:
         return
-    if is_opted_out(chat_id):
-        return
-
-    conn = _get_conn()
-    now = datetime.now(timezone.utc).isoformat()
     user_hash = _hash_user(chat_id)
-    rows = [(now, user_hash, dimension, v) for v in values]
-    conn.executemany(
-        "INSERT INTO filter_choices (timestamp, user_hash, dimension, value) VALUES (?, ?, ?, ?)",
-        rows,
-    )
-    conn.commit()
+    with dbutil.locked_connection(DB_PATH, _lock) as conn:
+        _init_db(conn)
+        if _is_opted_out(conn, user_hash):
+            return
+        now = _now()
+        conn.executemany(
+            "INSERT INTO filter_choices (timestamp, user_hash, dimension, value) "
+            "VALUES (?, ?, ?, ?)",
+            [(now, user_hash, dimension, v) for v in values],
+        )
+        conn.commit()
+
+
+def log_feedback(chat_id: int, text: str) -> None:
+    """Persist a /feedback message. Stored regardless of opt-out (the user is
+    explicitly submitting it) and preserved across reset_analytics()."""
+    user_hash = _hash_user(chat_id)
+    with dbutil.locked_connection(DB_PATH, _lock) as conn:
+        _init_db(conn)
+        conn.execute(
+            "INSERT INTO events (timestamp, user_hash, event_type, event_data) "
+            "VALUES (?, ?, ?, ?)",
+            (_now(), user_hash, FEEDBACK_EVENT, text),
+        )
+        conn.commit()
 
 
 def reset_analytics() -> dict[str, int]:
-    """Delete all events and filter_choices rows (keeps users table intact).
+    """Delete usage counters (command events + filter_choices).
 
-    Returns a dict with the number of deleted rows per table so the admin can
-    confirm the wipe.
+    Feedback rows (event_type='feedback') and the users table are preserved —
+    feedback is user-submitted content, not a disposable counter. Returns a dict
+    with the number of deleted rows per table so the admin can confirm the wipe.
     """
-    conn = _get_conn()
-    ev = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    fc = conn.execute("SELECT COUNT(*) FROM filter_choices").fetchone()[0]
-    conn.execute("DELETE FROM events")
-    conn.execute("DELETE FROM filter_choices")
-    conn.commit()
+    with dbutil.locked_connection(DB_PATH, _lock) as conn:
+        _init_db(conn)
+        ev = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type != ?", (FEEDBACK_EVENT,)
+        ).fetchone()[0]
+        fc = conn.execute("SELECT COUNT(*) FROM filter_choices").fetchone()[0]
+        conn.execute("DELETE FROM events WHERE event_type != ?", (FEEDBACK_EVENT,))
+        conn.execute("DELETE FROM filter_choices")
+        conn.commit()
     return {"events_deleted": ev, "filter_choices_deleted": fc}
 
 
 def get_analytics_summary() -> dict:
     """Get aggregated analytics for the /analytics command."""
-    conn = _get_conn()
+    with dbutil.locked_connection(DB_PATH, _lock) as conn:
+        _init_db(conn)
+        summary: dict = {}
 
-    summary = {}
+        # Total users (including opted-out — everyone counts)
+        summary["total_users"] = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
-    # Total users (including opted-out — everyone counts)
-    row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
-    summary["total_users"] = row[0] if row else 0
+        # Opted-out count
+        summary["opted_out_users"] = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE opted_out = 1"
+        ).fetchone()[0]
 
-    # Opted-out count
-    row = conn.execute("SELECT COUNT(*) FROM users WHERE opted_out = 1").fetchone()
-    summary["opted_out_users"] = row[0] if row else 0
+        # Total command interactions (feedback rows excluded from the counter)
+        summary["total_events"] = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type = ?", (COMMAND_EVENT,)
+        ).fetchone()[0]
 
-    # Total events (only from opted-in users)
-    row = conn.execute("SELECT COUNT(*) FROM events").fetchone()
-    summary["total_events"] = row[0] if row else 0
+        # Command usage breakdown
+        rows = conn.execute(
+            "SELECT event_data, COUNT(*) as cnt FROM events "
+            "WHERE event_type = ? GROUP BY event_data ORDER BY cnt DESC",
+            (COMMAND_EVENT,),
+        ).fetchall()
+        summary["commands"] = {row[0]: row[1] for row in rows}
 
-    # Command usage breakdown
-    rows = conn.execute(
-        "SELECT event_data, COUNT(*) as cnt FROM events "
-        "WHERE event_type = 'command' GROUP BY event_data ORDER BY cnt DESC"
-    ).fetchall()
-    summary["commands"] = {row[0]: row[1] for row in rows}
+        def _top(dimension: str, limit: int | None) -> dict:
+            sql = (
+                "SELECT value, COUNT(*) as cnt FROM filter_choices "
+                "WHERE dimension = ? GROUP BY value ORDER BY cnt DESC"
+            )
+            if limit:
+                sql += f" LIMIT {int(limit)}"
+            return {r[0]: r[1] for r in conn.execute(sql, (dimension,)).fetchall()}
 
-    # Top technologies
-    rows = conn.execute(
-        "SELECT value, COUNT(*) as cnt FROM filter_choices "
-        "WHERE dimension = 'technology' GROUP BY value ORDER BY cnt DESC LIMIT 10"
-    ).fetchall()
-    summary["top_technologies"] = {row[0]: row[1] for row in rows}
-
-    # Top categories
-    rows = conn.execute(
-        "SELECT value, COUNT(*) as cnt FROM filter_choices "
-        "WHERE dimension = 'category' GROUP BY value ORDER BY cnt DESC LIMIT 10"
-    ).fetchall()
-    summary["top_categories"] = {row[0]: row[1] for row in rows}
-
-    # Top cities
-    rows = conn.execute(
-        "SELECT value, COUNT(*) as cnt FROM filter_choices "
-        "WHERE dimension = 'city' GROUP BY value ORDER BY cnt DESC LIMIT 10"
-    ).fetchall()
-    summary["top_cities"] = {row[0]: row[1] for row in rows}
-
-    # Top seniorities
-    rows = conn.execute(
-        "SELECT value, COUNT(*) as cnt FROM filter_choices "
-        "WHERE dimension = 'seniority' GROUP BY value ORDER BY cnt DESC"
-    ).fetchall()
-    summary["top_seniorities"] = {row[0]: row[1] for row in rows}
-
-    # Top workplaces
-    rows = conn.execute(
-        "SELECT value, COUNT(*) as cnt FROM filter_choices "
-        "WHERE dimension = 'workplace' GROUP BY value ORDER BY cnt DESC"
-    ).fetchall()
-    summary["top_workplaces"] = {row[0]: row[1] for row in rows}
+        summary["top_technologies"] = _top("technology", 10)
+        summary["top_categories"] = _top("category", 10)
+        summary["top_cities"] = _top("city", 10)
+        summary["top_seniorities"] = _top("seniority", None)
+        summary["top_workplaces"] = _top("workplace", None)
 
     return summary

@@ -33,6 +33,8 @@ import threading
 import time
 from pathlib import Path
 
+from telegram_bot import dbutil
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(
@@ -43,6 +45,26 @@ DB_PATH = Path(
 )
 
 _lock = threading.Lock()
+
+# --- Subscription lookup cache ---------------------------------------------
+# get_subscription() is on the hot path (has_feature/is_subscribed/listing_cap
+# all call it, some directly on the event loop). We cache the raw subscription
+# row per chat_id for a short TTL and always re-derive the lifecycle status from
+# the cached expiry, so a cached entry can't get "stuck" across a grace/expiry
+# boundary. Every mutator invalidates the affected chat_id.
+_SUB_CACHE_TTL = float(os.environ.get("SUBSCRIPTION_CACHE_TTL", "30"))
+_sub_cache: dict[int, tuple[float, tuple[str, float] | None]] = {}
+_cache_lock = threading.Lock()
+
+
+def invalidate_subscription_cache(chat_id: int | None = None) -> None:
+    """Drop cached subscription state (one chat_id, or all when None)."""
+    with _cache_lock:
+        if chat_id is None:
+            _sub_cache.clear()
+        else:
+            _sub_cache.pop(chat_id, None)
+
 
 # --- Lifecycle tunables -----------------------------------------------------
 # Grace period after expiry during which access continues while the user is
@@ -110,10 +132,7 @@ FREE_MAX_LISTINGS = int(os.environ.get("FREE_MAX_LISTINGS", "20"))
 
 
 def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    return conn
+    return dbutil.connect(DB_PATH)
 
 
 def _init(conn: sqlite3.Connection) -> None:
@@ -194,6 +213,7 @@ def activate(chat_id: int, tier: str, *, days: int | None = None) -> float:
                 (chat_id, tier, expires, now),
             )
             conn.commit()
+            invalidate_subscription_cache(chat_id)
             return expires
         finally:
             conn.close()
@@ -230,29 +250,81 @@ def activate_trial(chat_id: int) -> float | None:
     return activate(chat_id, "plus", days=TRIAL_DAYS)
 
 
-def record_payment(charge_id: str, chat_id: int, tier: str, stars: int) -> None:
-    """Persist a successful Stars charge (idempotent on charge_id)."""
+def record_payment(charge_id: str, chat_id: int, tier: str, stars: int) -> bool:
+    """Persist a successful Stars charge (idempotent on charge_id).
+
+    Returns True if the charge was newly recorded, False if it was already
+    present (i.e. a duplicate/redelivered payment event).
+    """
     with _lock:
         conn = _connect()
         try:
             _init(conn)
-            conn.execute(
+            cur = conn.execute(
                 "INSERT OR IGNORE INTO payments (charge_id, chat_id, tier, stars, paid_at) "
                 "VALUES (?,?,?,?,?)",
                 (charge_id, chat_id, tier, stars, time.time()),
             )
             conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 
 
-def get_subscription(chat_id: int) -> dict | None:
-    """Return the active/grace subscription or None if none/fully-expired.
+def record_and_activate(
+    charge_id: str, chat_id: int, tier: str, stars: int, *, days: int | None = None
+) -> float | None:
+    """Atomically record a Stars charge and, only if it's new, activate/extend.
 
-    The result includes a lifecycle ``status`` ('active' or 'grace') and an
-    ``in_grace`` flag. Access continues through the grace window (see
-    ``GRACE_DAYS``); only once past grace is the subscription considered gone.
+    This is the payment entry point: recording the charge and granting access
+    happen in a single transaction keyed on ``charge_id``, so a duplicate or
+    redelivered ``successful_payment`` update can't stack a second subscription
+    period, and a crash can't leave a charge recorded-but-not-activated.
+
+    Returns the new expiry epoch, or None if the charge was already processed.
     """
+    if tier not in TIERS:
+        raise ValueError(f"unknown tier {tier!r}")
+    days = days if days is not None else TIERS[tier]["days"]
+    now = time.time()
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO payments (charge_id, chat_id, tier, stars, paid_at) "
+                "VALUES (?,?,?,?,?)",
+                (charge_id, chat_id, tier, stars, now),
+            )
+            if cur.rowcount == 0:
+                # Charge already processed — do not re-activate.
+                return None
+            row = conn.execute(
+                "SELECT expires_at FROM subscriptions WHERE chat_id=?", (chat_id,)
+            ).fetchone()
+            base = max(now, row["expires_at"]) if row else now
+            expires = base + days * 86400
+            conn.execute(
+                "INSERT INTO subscriptions (chat_id, tier, expires_at, updated_at) "
+                "VALUES (?,?,?,?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET tier=excluded.tier, "
+                "expires_at=excluded.expires_at, updated_at=excluded.updated_at",
+                (chat_id, tier, expires, now),
+            )
+            conn.commit()
+            invalidate_subscription_cache(chat_id)
+            return expires
+        finally:
+            conn.close()
+
+
+def _fetch_subscription_row(chat_id: int) -> tuple[str, float] | None:
+    """Return (tier, expires_at) for a chat, using a short-TTL cache."""
+    now = time.time()
+    with _cache_lock:
+        entry = _sub_cache.get(chat_id)
+        if entry is not None and entry[0] > now:
+            return entry[1]
     with _lock:
         conn = _connect()
         try:
@@ -262,14 +334,29 @@ def get_subscription(chat_id: int) -> dict | None:
             ).fetchone()
         finally:
             conn.close()
-    if not row:
+    value = (row["tier"], row["expires_at"]) if row else None
+    with _cache_lock:
+        _sub_cache[chat_id] = (now + _SUB_CACHE_TTL, value)
+    return value
+
+
+def get_subscription(chat_id: int) -> dict | None:
+    """Return the active/grace subscription or None if none/fully-expired.
+
+    The result includes a lifecycle ``status`` ('active' or 'grace') and an
+    ``in_grace`` flag. Access continues through the grace window (see
+    ``GRACE_DAYS``); only once past grace is the subscription considered gone.
+    """
+    value = _fetch_subscription_row(chat_id)
+    if not value:
         return None
-    status = _status(row["expires_at"], time.time())
+    tier, expires_at = value
+    status = _status(expires_at, time.time())
     if status is None:
         return None
     return {
-        "tier": row["tier"],
-        "expires_at": row["expires_at"],
+        "tier": tier,
+        "expires_at": expires_at,
         "status": status,
         "in_grace": status == "grace",
     }
@@ -362,6 +449,7 @@ def refund_payment(charge_id: str) -> dict | None:
             # Revoke access for the buyer (full refund ends the subscription).
             conn.execute("DELETE FROM subscriptions WHERE chat_id=?", (row["chat_id"],))
             conn.commit()
+            invalidate_subscription_cache(row["chat_id"])
             return dict(row)
         finally:
             conn.close()
@@ -375,6 +463,7 @@ def revoke_subscription(chat_id: int) -> bool:
             _init(conn)
             cur = conn.execute("DELETE FROM subscriptions WHERE chat_id=?", (chat_id,))
             conn.commit()
+            invalidate_subscription_cache(chat_id)
             return cur.rowcount > 0
         finally:
             conn.close()

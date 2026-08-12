@@ -20,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 
+from telegram_bot import dbutil
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(
@@ -35,10 +37,7 @@ _lock = threading.Lock()
 
 
 def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    return conn
+    return dbutil.connect(DB_PATH)
 
 
 def _init(conn: sqlite3.Connection) -> None:
@@ -138,6 +137,37 @@ def list_applications(chat_id: int, status: str | None = None) -> list[dict]:
                     (chat_id,),
                 ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+def list_page(chat_id: int, status: str | None, limit: int, offset: int) -> tuple[list[dict], int]:
+    """Return one page of tracked listings plus the total count for the filter.
+
+    Ordered by ``created_at DESC, listing_id`` — a *stable* key that doesn't
+    change when a listing's status is updated, so rows can't shift across page
+    boundaries between navigation taps (unlike ordering by updated_at). Pagination
+    happens in SQL (LIMIT/OFFSET) rather than loading the whole table per tap.
+    """
+    where = "WHERE chat_id=?"
+    params: list = [chat_id]
+    if status:
+        where += " AND status=?"
+        params.append(status)
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM applications {where}",  # noqa: S608 (where is constant)
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT * FROM applications {where} "  # noqa: S608
+                "ORDER BY created_at DESC, listing_id LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+            return [dict(r) for r in rows], total
         finally:
             conn.close()
 

@@ -1,6 +1,0 @@
-# Unity Catalog Volume
-# Volume requires unity-catalog scope on the PAT, which Free Edition may not grant.
-# Create manually in workspace instead:
-#   CREATE VOLUME IF NOT EXISTS job_market.bronze.raw_listings;
-#
-# This file is kept as documentation only.

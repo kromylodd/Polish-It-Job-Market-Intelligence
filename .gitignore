@@ -12,6 +12,8 @@ build/
 # Virtual environments
 .venv/
 .venv-pipeline/
+.venv-test/
+.testdeps/
 venv/
 env/
 .conda/
@@ -26,10 +28,6 @@ env/
 .DS_Store
 Thumbs.db
 
-# Databricks
-.databricks/
-*.whl
-
 # dbt
 dbt/target/
 dbt/dbt_packages/
@@ -39,6 +37,7 @@ dbt/.user.yml
 # Environment / secrets
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 
@@ -59,6 +58,7 @@ telegram_bot/serving.duckdb
 telegram_bot/serving.duckdb.wal
 telegram_bot/tracker.db
 telegram_bot/payments.db
+telegram_bot/alerts.db
 
 # Pipeline database (runtime output — rebuilt from raw data by the pipeline)
 pipeline.duckdb
@@ -69,4 +69,3 @@ data/
 *.json
 !scraper/tests/sample_raw_listing.json
 !dbt/seeds/*.csv
-!dashboards/*.lvdash.json

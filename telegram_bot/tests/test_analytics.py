@@ -7,18 +7,9 @@ from telegram_bot import analytics
 
 @pytest.fixture
 def fresh_db(tmp_path, monkeypatch):
-    """Point analytics at a throwaway SQLite file and reset the thread-local conn."""
+    """Point analytics at a throwaway SQLite file (per-call connections, no state)."""
     monkeypatch.setattr(analytics, "DB_PATH", tmp_path / "analytics_test.db")
-
-    def _reset():
-        conn = getattr(analytics._local, "conn", None)
-        if conn is not None:
-            conn.close()
-            del analytics._local.conn
-
-    _reset()
     yield analytics
-    _reset()
 
 
 def test_new_user_detected_once(fresh_db):
@@ -71,3 +62,42 @@ def test_hash_is_deterministic_and_non_raw(fresh_db):
     assert h1 == h2
     assert "555" not in h1
     assert len(h1) == 16
+
+
+def test_reset_preserves_feedback_but_wipes_counters(fresh_db):
+    fresh_db.log_command(1, "start")
+    fresh_db.log_filter_choice(1, "technology", ["Python"])
+    fresh_db.log_feedback(1, "please add Rust filters")
+
+    result = fresh_db.reset_analytics()
+    assert result["events_deleted"] >= 1  # the command event
+    assert result["filter_choices_deleted"] >= 1
+
+    summary = fresh_db.get_analytics_summary()
+    assert summary["total_events"] == 0  # command counters wiped
+    assert summary["commands"] == {}
+    assert summary["top_technologies"] == {}
+    assert summary["total_users"] == 1  # users preserved
+
+    # Feedback row must survive the reset.
+    import sqlite3
+
+    conn = sqlite3.connect(str(fresh_db.DB_PATH))
+    n = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE event_type = ?", (fresh_db.FEEDBACK_EVENT,)
+    ).fetchone()[0]
+    conn.close()
+    assert n == 1
+
+
+def test_feedback_logged_even_when_opted_out(fresh_db):
+    fresh_db.set_opt_out(2, True)
+    fresh_db.log_feedback(2, "hi")
+    import sqlite3
+
+    conn = sqlite3.connect(str(fresh_db.DB_PATH))
+    n = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE event_type = ?", (fresh_db.FEEDBACK_EVENT,)
+    ).fetchone()[0]
+    conn.close()
+    assert n == 1

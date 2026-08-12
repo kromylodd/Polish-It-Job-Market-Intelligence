@@ -132,6 +132,55 @@ def test_record_payment_idempotent(payments):
     assert n == 1
 
 
+def test_record_payment_returns_inserted_flag(payments):
+    assert payments.record_payment("c-new", 1, "pro", 600) is True
+    assert payments.record_payment("c-new", 1, "pro", 600) is False  # duplicate
+
+
+def test_record_and_activate_is_idempotent(payments):
+    # First delivery: records the charge and activates.
+    exp1 = payments.record_and_activate("charge_x", 5, "pro", 600)
+    assert exp1 is not None
+    assert payments.is_subscribed(5, "pro") is True
+
+    # Redelivered same charge: no second activation, expiry unchanged, no stacking.
+    exp2 = payments.record_and_activate("charge_x", 5, "pro", 600)
+    assert exp2 is None
+    sub = payments.get_subscription(5)
+    assert sub["expires_at"] == pytest.approx(exp1, abs=1)
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(payments.DB_PATH))
+    n = conn.execute("SELECT count(*) FROM payments WHERE charge_id='charge_x'").fetchone()[0]
+    conn.close()
+    assert n == 1
+
+
+def test_record_and_activate_distinct_charges_stack(payments):
+    e1 = payments.record_and_activate("a", 6, "plus", 250)
+    e2 = payments.record_and_activate("b", 6, "plus", 250)
+    assert e1 is not None and e2 is not None
+    # A genuine second purchase extends from the first expiry.
+    assert (e2 - e1) == pytest.approx(30 * 86400, abs=5)
+
+
+def test_cache_invalidated_on_revoke(payments):
+    payments.activate(9, "pro")
+    assert payments.is_subscribed(9) is True
+    payments.revoke_subscription(9)
+    # Must reflect immediately despite the get_subscription cache.
+    assert payments.is_subscribed(9) is False
+    assert payments.get_subscription(9) is None
+
+
+def test_cache_invalidated_on_refund(payments):
+    payments.record_and_activate("ch-ref", 10, "pro", 600)
+    assert payments.is_subscribed(10) is True
+    payments.refund_payment("ch-ref")
+    assert payments.is_subscribed(10) is False
+
+
 def test_tiers_pricing(payments):
     assert payments.TIERS["plus"]["stars"] == 250
     assert payments.TIERS["pro"]["stars"] == 600

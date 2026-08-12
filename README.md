@@ -4,7 +4,7 @@ An end-to-end **data platform + monetizable product** for Poland's IT job market
 
 [![CI](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/ci.yml)
 [![Daily Scrape](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/scrape.yml/badge.svg)](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/scrape.yml)
-[![tests](https://img.shields.io/badge/tests-100%20passing-success)](#testing)
+[![tests](https://img.shields.io/badge/tests-113%20passing-success)](#testing)
 [![DuckDB](https://img.shields.io/badge/DuckDB-Pipeline-FFF000?logo=duckdb&logoColor=black)](#tech-stack)
 
 > **Stage 3 companion** to the [Polish Housing Market Intelligence Platform](https://github.com/kromylodd/Polish-Housing-Market-Intelligence-Platform) — deliberately built on a **different stack** (DuckDB / Polars / dbt-duckdb / systemd vs. GCP / BigQuery / Airflow / Terraform) to demonstrate cross-platform fluency, then taken one step further: this one ships a **user-facing product with a payment layer** on top of the warehouse.
@@ -38,7 +38,7 @@ An end-to-end **data platform + monetizable product** for Poland's IT job market
 
 Most portfolio data projects stop at "scrape → warehouse → dashboard nobody opens." This one closes the loop to an actual **product a user interacts with daily**: it answers "what should I learn, where should I apply, and what should I earn?" for the Polish IT market, and it has a real (if small-scale) revenue model. The engineering underneath is built the way an internal analytics platform would be — a medallion lakehouse, a Kimball-style star schema with many-to-many bridge tables, a data-quality gate, IaC, and CI/CD — but the consumption layer is a push-based Telegram bot instead of a pull-based BI dashboard, because that's what actually gets used by job seekers.
 
-It also intentionally uses a completely different toolchain from my [first data platform](https://github.com/kromylodd/Polish-Housing-Market-Intelligence-Platform), so the two projects together show I can design the same class of system on both a GCP-native and a Databricks-native stack rather than knowing exactly one vendor.
+It also intentionally uses a completely different toolchain from my [first data platform](https://github.com/kromylodd/Polish-Housing-Market-Intelligence-Platform), so the two projects together show I can design the same class of system on both a **GCP-native** stack and a **self-hosted DuckDB/Polars/dbt** stack rather than knowing exactly one vendor. (This project began on Databricks Free Edition and was later migrated to the self-hosted pipeline — see [`docs/migration_plan.md`](docs/migration_plan.md).)
 
 ## Architecture
 
@@ -78,7 +78,7 @@ A single pipeline.duckdb file is both the warehouse and the serving layer:
 | Product | python-telegram-bot 21.5 (long-polling, JobQueue, inline menus) |
 | Serving | DuckDB (bot reads gold.* tables directly from pipeline output) |
 | Payments | Telegram Stars (`currency=XTR`, no third-party provider) |
-| Bot state | SQLite (subscriptions, payments, application tracker, analytics) |
+| Bot state | SQLite (subscriptions, payments, application tracker, analytics, alert idempotency) — all created `0600` via a shared connection helper |
 | Charts | matplotlib (Agg backend, headless PNG) |
 | Hosting | GCP e2-micro free tier (systemd services for bot + pipeline) |
 
@@ -120,7 +120,7 @@ Payments use **Telegram Stars** (`currency="XTR"`, empty provider token) — no 
 | **Plus** | 250 ⭐ / 30 days | Saved-filter push, `/latest` on demand, `/salary`, `/trend`, up to 50 listings/run |
 | **Pro** | 600 ⭐ / 30 days | Everything in Plus + `/skills` co-occurrence, `/company` intel, `/export`, application tracker, weekly report, up to 100 listings/run |
 
-Feature gating respects a tier hierarchy (Pro ⊇ Plus), persisted in SQLite with expiry. Paid tiers also raise the per-run listing cap (free 20 → Plus 50 → Pro 100); the bot stamps each user's cap into the shared config so the GitHub Actions / Databricks broadcast senders honour it without touching the subscription store. The pricing is deliberately structured so **Pro needs only ~3–4 subscribers to match the net revenue of ~9 Plus subscribers** — selling fewer, more valuable subscriptions rather than racing to the bottom.
+Feature gating respects a tier hierarchy (Pro ⊇ Plus), persisted in SQLite with expiry. Paid tiers also raise the per-run listing cap (free 20 → Plus 50 → Pro 100); the daily broadcast derives each user's cap directly from the subscription store (`payments.listing_cap`) since the bot and the broadcast run in the same process on the VM. Users can always see their remaining time — the `/premium` menu and `/subscribe` both show the expiry date and days left (or a grace-period note). The pricing is deliberately structured so **Pro needs only ~3–4 subscribers to match the net revenue of ~9 Plus subscribers** — selling fewer, more valuable subscriptions rather than racing to the bottom.
 
 ## The Serving Layer: Why a Single DuckDB File
 
@@ -181,6 +181,15 @@ Real failures hit and fixed during development — the interesting part of a dat
 - **JSON array unnest in dbt.** DuckDB can't `LATERAL VIEW EXPLODE` like Spark. Solved with a `json_array_length` + `range` + `unnest` pattern that indexes into the JSON array by position.
 - **Multi-user & idempotency bugs.** Per-user config isolation (atomic writes, no shared-list mutation), a per-`(listing, chat)` idempotency log so alerts never duplicate.
 
+**Post-migration hardening pass** (a full code review, then fixes — see git history):
+
+- **No lost payments on restart.** The bot no longer drops pending updates on startup, and payment handling is fully idempotent: `record_and_activate` records the charge and grants access in a single transaction keyed on `charge_id`, so a redelivered `successful_payment` can't double-stack a subscription and a restart mid-payment can't drop it.
+- **Billing data isn't world-readable.** All SQLite stores go through one connection helper that enforces `0600`, and the systemd units set `UMask=0077`.
+- **Serving fast-path actually engages.** Fixed a latent bug where the on-demand cache query used the wrong (unqualified) table name and silently fell through; it now reads `gold.mart_market_snapshot` via `fetchall()` (no pandas dependency at runtime).
+- **Pipeline DB is read-only from the bot.** The alert idempotency log moved out of `pipeline.duckdb` into its own SQLite file, so the bot never contends for a write lock on the pipeline's analytical DB.
+- **Stable tracker pagination.** Pages are fetched in SQL ordered by a stable key (`created_at`), so re-marking a listing's status can't shift rows across page boundaries.
+- **Hot-path subscription lookups** are served from a short-TTL cache (invalidated on every mutation) to keep SQLite reads off the async event loop.
+
 ## Project Structure
 
 ```
@@ -204,11 +213,13 @@ polish-it-job-market-intelligence/
 │   ├── bot.py                      # commands, inline menus, payment flow, JobQueue
 │   ├── filters.py                  # universal tolerance-matching filter logic
 │   ├── serving.py                  # reads gold.* directly from pipeline DuckDB
-│   ├── payments.py                 # Telegram Stars subscriptions (SQLite)
-│   ├── tracker.py                  # application tracker (SQLite)
+│   ├── payments.py                 # Telegram Stars subscriptions (SQLite) + cache
+│   ├── tracker.py                  # application tracker (SQLite, paginated)
 │   ├── reports.py                  # weekly report + matplotlib charts
+│   ├── dbutil.py                   # shared SQLite helper (0600 perms + locking)
 │   ├── notify.py / config_store.py / analytics.py
-│   └── tests/                      # filters, analytics, config, serving, tracker, payments
+│   └── tests/                      # filters, analytics, config, serving, tracker, payments, bot_data
+│   # runtime SQLite (gitignored): payments.db · tracker.db · analytics.db · alerts.db
 ├── deploy/
 │   ├── setup_vm.sh                 # one-shot: both venvs + both services + timer
 │   ├── pipeline.service            # systemd oneshot (pipeline run)
@@ -229,7 +240,7 @@ polish-it-job-market-intelligence/
 
 | Job | What it does |
 |---|---|
-| `lint-and-test` | `ruff check .`, `ruff format --check .`, `black --check .`, `pytest` (100 tests) |
+| `lint-and-test` | `ruff check .`, `ruff format --check .`, `black --check .`, `pytest` (113 tests) |
 | `dbt-parse` | `dbt deps` + `dbt parse` (pinned dbt-duckdb) to catch model errors early |
 
 **`.github/workflows/scrape.yml`** — daily (03:00 UTC) + manual: scrape → verify output → SCP to VM → SSH trigger pipeline → verify pipeline success. No Databricks involvement.
@@ -246,11 +257,13 @@ The bot is long-polling (no inbound ports), so any always-on Linux box works.
 
 ```bash
 pip install -r requirements-ci.txt
-pytest -q            # 100 tests: scraper parser, filters, analytics, config,
-                     # serving layer, application tracker, Stars payments, reports
+PYTHONPATH=. pytest -q   # 113 tests: scraper parser, filters, analytics, config,
+                         # serving layer, application tracker (+ pagination),
+                         # Stars payments (idempotent activation, refunds, cache),
+                         # daily-broadcast caps, reports, local-cache reader
 ```
 
-The serving/reports tests seed a temporary DuckDB with sample gold-schema marts so the analytics helpers (weighted salary aggregation, co-occurrence %, skill ranking, chart PNG generation) are exercised for real, not skipped. `requirements-ci.txt` includes duckdb + matplotlib so CI runs them too.
+The serving/reports/bot-data tests seed a temporary DuckDB with sample gold-schema marts so the analytics helpers (weighted salary aggregation, co-occurrence %, skill ranking, chart PNG generation) and the bot's local-cache reader are exercised for real, not skipped. `requirements-ci.txt` includes duckdb + matplotlib so CI runs them too.
 
 ## Setup
 
@@ -272,7 +285,8 @@ python -m pipeline.run_pipeline --data-file data/raw_listings_latest.json
 ### Bot (local)
 ```bash
 pip install -r telegram_bot/requirements.txt
-set -a && source .env && set +a          # TELEGRAM_BOT_TOKEN, ANALYTICS_SALT, PIPELINE_DB_PATH
+cp .env.example .env && chmod 600 .env    # then fill in real values
+set -a && source .env && set +a           # TELEGRAM_BOT_TOKEN, ANALYTICS_SALT, PIPELINE_DB_PATH
 python3 -m telegram_bot.bot
 ```
 
@@ -305,8 +319,9 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 - ~~Lower the scrape delay now that 429 `Retry-After` handling exists.~~ ✅ Done (0.5s).
 - ~~Move the bot to a free-tier cloud VM for true 24/7 independence from a laptop.~~ ✅ Done — GCP `e2-micro` in `us-west1-b`.
 - ~~Migrate pipeline off Databricks Free Edition.~~ ✅ Done — self-hosted Polars + DuckDB + dbt-duckdb.
-- [ ] Delete legacy Databricks files after validation period.
-- [ ] Add historical trend data (backfill from old Databricks Delta tables).
+- ~~Delete legacy Databricks files after validation period.~~ ✅ Done — notebooks, DAB bundle, Volume uploader, and dashboards removed.
+- [ ] Add historical trend data (backfill from archived raw-scrape snapshots).
+- [ ] Off-box nightly backup of `payments.db` (billing data) to object storage.
 
 ## Scraping Ethics
 

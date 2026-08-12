@@ -1,3 +1,4 @@
+DO NOT Commit
 Yesterday I opened the Databricks run history and saw a picket fence.
 
 Dozens of runs in a few hours. Every scrape was triggering the pipeline twice — once from the file upload (file_arrival), once from the API call. Both had comments saying "primary trigger" in different config files. Both were right. Both were wrong together.

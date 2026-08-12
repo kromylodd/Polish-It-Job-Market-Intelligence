@@ -36,12 +36,3 @@ def test_save_is_atomic_no_tmp_left_behind(local_store):
     local_store.save_local({"1": {"tolerance": 1}})
     leftovers = list(local_store.LOCAL_PATH.parent.glob("*.tmp"))
     assert leftovers == []
-
-
-def test_volume_disabled_without_credentials(monkeypatch):
-    monkeypatch.delenv("DATABRICKS_HOST", raising=False)
-    monkeypatch.delenv("DATABRICKS_TOKEN", raising=False)
-    assert config_store.volume_enabled() is False
-    # Guards short-circuit before any network/SDK use.
-    assert config_store.upload_to_volume({"1": {}}) is False
-    assert config_store.download_from_volume() is None

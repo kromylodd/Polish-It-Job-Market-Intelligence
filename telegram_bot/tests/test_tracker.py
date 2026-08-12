@@ -66,3 +66,38 @@ def test_remove(tracker):
 def test_invalid_status_raises(tracker):
     with pytest.raises(ValueError):
         tracker.set_status(1, "a", "maybe")
+
+
+def test_list_page_totals_and_slicing(tracker):
+    for i in range(15):
+        tracker.set_status(1, f"job{i:02d}", "applied")
+    page0, total = tracker.list_page(1, None, 10, 0)
+    assert total == 15
+    assert len(page0) == 10
+    page1, total1 = tracker.list_page(1, None, 10, 10)
+    assert total1 == 15
+    assert len(page1) == 5
+    # No overlap between pages.
+    ids0 = {r["listing_id"] for r in page0}
+    ids1 = {r["listing_id"] for r in page1}
+    assert ids0.isdisjoint(ids1)
+
+
+def test_list_page_order_stable_across_status_update(tracker):
+    for i in range(15):
+        tracker.set_status(1, f"job{i:02d}", "applied")
+    page0_before = [r["listing_id"] for r in tracker.list_page(1, None, 10, 0)[0]]
+    # Re-mark an item on page 0: updates updated_at but NOT created_at, so the
+    # created_at-ordered page must not shift (the pagination-instability bug).
+    tracker.set_status(1, page0_before[0], "rejected")
+    page0_after = [r["listing_id"] for r in tracker.list_page(1, None, 10, 0)[0]]
+    assert page0_after == page0_before
+
+
+def test_list_page_status_filter(tracker):
+    tracker.set_status(1, "a", "applied")
+    tracker.set_status(1, "b", "interested")
+    tracker.set_status(1, "c", "applied")
+    rows, total = tracker.list_page(1, "applied", 10, 0)
+    assert total == 2
+    assert all(r["status"] == "applied" for r in rows)

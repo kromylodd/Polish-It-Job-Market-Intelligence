@@ -5,14 +5,16 @@ works. It keeps a small amount of local state under `telegram_bot/`:
 
 | File | Purpose | Sensitive? |
 | --- | --- | --- |
-| `user_config.json` | per-user filters (mirrored to the Databricks Volume) | low |
+| `user_config.json` | per-user filters (local, authoritative) | low |
 | `analytics.db` | anonymous usage stats (hashed chat IDs) | low |
 | `tracker.db` | per-user application tracker | user data |
 | `payments.db` | subscriptions + Stars payment log | billing |
-| `serving.duckdb` | cache of gold marts for instant premium queries | disposable |
+| `alerts.db` | per-(listing, chat) daily-alert idempotency log | disposable |
 
-All of these are gitignored. Back up `tracker.db` and `payments.db` — they hold
-real user/billing state. `serving.duckdb` is a rebuildable cache.
+All of these are gitignored and created with `0600` permissions. Back up
+`tracker.db` and `payments.db` — they hold real user/billing state. `alerts.db`
+is a rebuildable idempotency log. The gold marts live in `pipeline.duckdb` (repo
+root), which the bot opens **read-only**; the pipeline is its only writer.
 
 ## Required environment variables
 
@@ -20,22 +22,19 @@ Put these in `.env` (already gitignored):
 
 ```
 TELEGRAM_BOT_TOKEN=...          # from BotFather
-TELEGRAM_CHAT_ID=...            # your admin chat id (enables /stats, /analytics, /refresh)
+TELEGRAM_CHAT_ID=...            # your admin chat id (enables /stats, /analytics, /givepremium, /refund)
 ANALYTICS_SALT=...              # random 32-byte hex, for hashing chat IDs
-DATABRICKS_HOST=...             # workspace host (scheme optional; the bot adds https://)
-DATABRICKS_TOKEN=...            # PAT
-DATABRICKS_WAREHOUSE_ID=...     # SQL warehouse id — needed for the serving-cache sync
 # Optional:
-SERVING_SYNC_INTERVAL_SECONDS=21600   # background mart refresh cadence (default 6h)
-USER_CONFIG_VOLUME_PATH=...           # override the Volume mirror path
+PIPELINE_DB_PATH=/home/<user>/polish-it-job-market-intelligence/pipeline.duckdb  # gold marts (bot reads read-only)
 ```
 
+See `.env.example` at the repo root for the full annotated template.
+
 Premium analytics (`/salary <tech>`, `/trend`, `/skills`, `/company`, `/report`)
-read from the local **serving cache** (`serving.duckdb`), which the bot refreshes
-from Databricks on startup (if stale) and every `SERVING_SYNC_INTERVAL_SECONDS`.
-You can force a refresh anytime with the admin `/refresh` command. If Databricks
-env vars are missing the bot still runs — premium analytics just report
-"data not ready" until a sync succeeds.
+read directly from the pipeline's local DuckDB (`pipeline.duckdb`) — no sync
+step, no network, no cold starts. If the pipeline hasn't run yet, the bot still
+runs and premium commands just report "data not ready" until the first run
+populates the gold marts.
 
 ## Telegram Stars payments
 
