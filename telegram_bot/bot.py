@@ -1973,7 +1973,9 @@ def _build_tracker_message(
     page = min(page, total_pages - 1)
 
     # Header with totals
-    filter_label = f" ({icon.get(status_filter, '')} {status_filter})" if status_filter else " (all)"
+    filter_label = (
+        f" ({icon.get(status_filter, '')} {status_filter})" if status_filter else " (all)"
+    )
     header = (
         f"📋 <b>Your tracker</b>{filter_label} — "
         f"✅ {c.get('applied', 0)} · 👀 {c.get('interested', 0)} · ❌ {c.get('rejected', 0)}\n"
@@ -2003,13 +2005,9 @@ def _build_tracker_message(
 
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(
-            InlineKeyboardButton("◀️ Prev", callback_data=f"trkpg:{sf}:{page - 1}")
-        )
+        nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"trkpg:{sf}:{page - 1}"))
     if page < total_pages - 1:
-        nav_buttons.append(
-            InlineKeyboardButton("Next ▶️", callback_data=f"trkpg:{sf}:{page + 1}")
-        )
+        nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"trkpg:{sf}:{page + 1}"))
 
     rows = [filter_buttons]
     if nav_buttons:
@@ -2018,9 +2016,7 @@ def _build_tracker_message(
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-async def _do_mytracker(
-    context, chat_id: int, *, status_filter: str | None = None, page: int = 0
-):
+async def _do_mytracker(context, chat_id: int, *, status_filter: str | None = None, page: int = 0):
     """Show the user's tracked applications (paginated)."""
     if not await _require_feature_chat(
         context, chat_id, payments.FEATURE_TRACKER, "Application tracker"
@@ -2030,7 +2026,11 @@ async def _do_mytracker(
     c = await asyncio.to_thread(tracker.counts, chat_id)
     apps = await asyncio.to_thread(tracker.list_applications, chat_id, status_filter)
     if not apps:
-        msg = "📋 Your tracker is empty.\n" if not status_filter else f"📋 No <b>{status_filter}</b> offers.\n"
+        msg = (
+            "📋 Your tracker is empty.\n"
+            if not status_filter
+            else f"📋 No <b>{status_filter}</b> offers.\n"
+        )
         await context.bot.send_message(
             chat_id,
             msg + "Tap the buttons under /latest listings, or use /applied &lt;id&gt;.",
@@ -2212,7 +2212,6 @@ async def cmd_refund(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Refunded {pay['stars']} ⭐ to chat {pay['chat_id']} and revoked {pay['tier']}."
     )
-
 
 
 async def cmd_givepremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2553,9 +2552,7 @@ async def _daily_broadcast_job(context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application):
     """Register command menu with Telegram and seed config from the Volume."""
     # Default menu for all users
-    await application.bot.set_my_commands(
-        BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats()
-    )
+    await application.bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats())
     # Extended menu for admin (includes admin-only commands)
     if ADMIN_CHAT_ID:
         await application.bot.set_my_commands(
