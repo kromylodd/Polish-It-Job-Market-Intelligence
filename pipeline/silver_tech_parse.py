@@ -20,7 +20,7 @@ from pipeline import PIPELINE_DB_PATH, SCHEMA_SILVER
 
 logger = logging.getLogger(__name__)
 
-INPUT_TABLE = f"{SCHEMA_SILVER}.stg_listings"
+INPUT_TABLE = f"{SCHEMA_SILVER}.cleaned_listings"
 OUTPUT_TABLE = f"{SCHEMA_SILVER}.listings_with_tech"
 
 # Variant -> canonical mapping. Kept in sync with dbt/seeds/technology_lookup.csv
@@ -135,7 +135,7 @@ def _merge_unique(a, b, c) -> list[str]:
 def tech_parse() -> int:
     """Run tech parse transformation. Returns row count of output table.
 
-    Reads from silver.stg_listings, applies tech canonicalization and
+    Reads from silver.cleaned_listings, applies tech canonicalization and
     description extraction, writes to silver.listings_with_tech.
     """
     con = duckdb.connect(str(PIPELINE_DB_PATH))

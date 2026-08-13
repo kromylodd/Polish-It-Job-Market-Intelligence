@@ -20,7 +20,7 @@ from pipeline import PIPELINE_DB_PATH, SCHEMA_BRONZE, SCHEMA_SILVER
 logger = logging.getLogger(__name__)
 
 BRONZE_TABLE = f"{SCHEMA_BRONZE}.raw_job_listings"
-SILVER_TABLE = f"{SCHEMA_SILVER}.stg_listings"
+SILVER_TABLE = f"{SCHEMA_SILVER}.cleaned_listings"
 
 
 def _ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
