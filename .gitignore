@@ -69,3 +69,9 @@ data/
 *.json
 !scraper/tests/sample_raw_listing.json
 !dbt/seeds/*.csv
+
+# Personal career docs (do not publish)
+CV_PLAN.txt
+LINKEDIN_POSTS_PLAN.txt
+LINKEDIN_ABOUT_AND_BANNER.txt
+restrictions.txt

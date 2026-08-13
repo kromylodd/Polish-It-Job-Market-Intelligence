@@ -3,13 +3,12 @@
 An end-to-end **data platform** for Poland's IT job market — built as a production-style portfolio project. A scheduled scraper feeds a self-hosted medallion pipeline (bronze → silver → gold star schema via Polars + DuckDB + dbt) on a GCP e2-micro VM, and the gold marts power an **interactive Telegram bot** with daily job alerts and analytics (salary insights, tech co-occurrence, company intel, application tracker).
 
 [![CI](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/ci.yml)
-[![Daily Scrape](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/scrape.yml/badge.svg)](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/scrape.yml)
 [![tests](https://img.shields.io/badge/tests-113%20passing-success)](#testing)
 [![DuckDB](https://img.shields.io/badge/DuckDB-Pipeline-FFF000?logo=duckdb&logoColor=black)](#tech-stack)
 
 > **Stage 3 companion** to the [Polish Housing Market Intelligence Platform](https://github.com/kromylodd/Polish-Housing-Market-Intelligence-Platform) — deliberately built on a **different stack** (DuckDB / Polars / dbt-duckdb / systemd vs. GCP / BigQuery / Airflow / Terraform) to demonstrate cross-platform fluency, then taken one step further: this one ships a **user-facing product** on top of the warehouse.
 
-**Status: pipeline + bot both live.** The scraper runs daily via GitHub Actions, SCPs data to a GCP VM, and triggers the local pipeline (Polars + dbt-duckdb); the Telegram bot runs 24/7 as a systemd service reading gold marts directly from the pipeline's DuckDB file. Currently runs as a **personal tool** (single user) — all analytics features are free.
+**Status: live as a personal tool.** A scheduled refresh pulls the latest listings and runs the local pipeline (Polars + dbt-duckdb) on a GCP VM; the Telegram bot runs 24/7 as a systemd service, reading gold marts directly from the pipeline's DuckDB file. It runs for a **single user** (the author) as a personal job-hunting aid — all analytics features are free.
 
 ---
 
@@ -44,7 +43,7 @@ It also intentionally uses a completely different toolchain from my [first data 
 
 ```mermaid
 flowchart TD
-    A["GitHub Actions (daily cron 03:00 UTC)"] --> B["Scrape justjoin.it JSON API<br/>cursor pagination, ~10k listings"]
+    A["Scheduled refresh (cron) / manual trigger"] --> B["Fetch listings JSON API<br/>cursor pagination, ~10k listings"]
     B --> C["git pull + pip install on VM<br/>(auto-sync code & deps)"]
     C --> D["SCP raw_listings_latest.json<br/>to GCP VM"]
     D --> E["SSH trigger: python -m pipeline.run_pipeline"]
@@ -62,7 +61,7 @@ flowchart TD
 
 A single `pipeline.duckdb` file is both the warehouse and the serving layer:
 
-- **Batch (daily):** GitHub Actions scrapes and SCPs the data to the VM; SSH triggers the local pipeline (Polars + dbt-duckdb, ~22s total). The gold marts land directly in the DuckDB file the bot reads.
+- **Batch (scheduled):** a scheduled job refreshes the data on the VM and runs the local pipeline (Polars + dbt-duckdb, ~22s total). The gold marts land directly in the DuckDB file the bot reads.
 - **Interactive (24/7):** the Telegram bot serves on-demand analytics from the same DuckDB file — no sync, no network, no cold starts. Sub-second response guaranteed.
 
 ## Tech Stack
@@ -233,7 +232,7 @@ polish-it-job-market-intelligence/
 │   └── architecture_decisions.md   # ADRs
 └── .github/workflows/
     ├── ci.yml                      # lint, format, tests, dbt-parse
-    └── scrape.yml                  # daily scrape → sync VM → SCP → SSH trigger pipeline
+    └── scrape.yml                  # scrape → sync VM → SCP → SSH trigger pipeline
 ```
 
 ## CI/CD
@@ -245,8 +244,8 @@ polish-it-job-market-intelligence/
 | `lint-and-test` | `ruff check .`, `ruff format --check .`, `black --check .`, `pytest` (113 tests) |
 | `dbt-parse` | `dbt deps` + `dbt parse` (pinned dbt-duckdb) to catch model errors early |
 
-**`.github/workflows/scrape.yml`** — daily (03:00 UTC) + manual:
-1. Scrape justjoin.it → verify output (~10k listings, >1KB)
+**`.github/workflows/scrape.yml`** — scheduled + manual (`workflow_dispatch`):
+1. Fetch listings from the source JSON API → verify output (~10k listings, >1KB)
 2. SSH to VM → `git pull` + `pip install` (auto-sync code & deps)
 3. SCP data to VM
 4. SSH trigger pipeline → verify "PIPELINE COMPLETE" in output
@@ -258,7 +257,7 @@ The bot is long-polling (no inbound ports), so any always-on Linux box works.
 
 - **Production (current):** two systemd user services on a GCP e2-micro — the bot (`telegram-bot.service`) and the pipeline (`pipeline.service` + `pipeline.timer`). `loginctl enable-linger` so both survive logout/reboot.
 - **One-shot deploy:** `./deploy/setup_vm.sh` creates both venvs, installs all deps, registers both services and the timer.
-- **Redeploy:** SSH in → `git pull` + restart service. (The daily scrape workflow also auto-syncs code before each run.)
+- **Redeploy:** SSH in → `git pull` + restart service. (The scrape workflow also auto-syncs code before each run.)
 
 ## Testing
 
@@ -346,9 +345,8 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 - The bot serves **only aggregated analytics** (salary medians, tech co-occurrence percentages, demand trends). Daily alerts show only title/company/city/salary with a link back to justjoin.it — essentially a referral.
 
 **Legal awareness:** justjoin.it's `robots.txt` disallows `/api/`; their ToS is restrictive; EU sui generis database rights likely apply. For this reason:
-- The repo is **private**.
 - **Monetization is paused** (`PREMIUM_FREE = True`) until/unless a proper data license is obtained.
-- The project runs as a personal tool demonstrating the engineering, not as a commercial service.
+- The project runs as a **personal, non-commercial tool** demonstrating the engineering, not as a commercial service. No scraped data is redistributed — only aggregated statistics are shown, to the author.
 - If scaling or monetizing: consult a PL/EU IP+data lawyer; consider Adzuna (licensed API covering Poland) or seek permission from Just Join IT / Grupa Pracuj.
 
 ## Disclaimer

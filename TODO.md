@@ -21,7 +21,7 @@ Full production code review + fixes (test suite 100 → 113 passing, ruff + blac
 - [x] **Subscription-lookup cache** (30s TTL, invalidated on mutation) to keep SQLite off the event loop.
 - [x] **Users can see premium end date** — `/premium` + `/subscribe` show expiry + days left.
 - [x] **CI action versions fixed** (`checkout@v4`, `setup-python@v5` — v7/v6 don't exist), `.env.example` added.
-- [ ] **Rotate the Databricks PAT still in `.env`** — no longer used by any code, but it was exposed.
+- [x] **Databricks PAT removed** — no longer used by any code; credential deleted.
 - [ ] **Off-box nightly backup of `payments.db`** (billing data) to object storage.
 - [ ] **Split `bot.py`** (~2600 lines) into cohesive handler modules — deferred (needs handler tests first).
 - [ ] **Observability:** systemd watchdog / liveness ping so a silently-dead bot is noticed.
@@ -82,7 +82,7 @@ Full production code review + fixes (test suite 100 → 113 passing, ruff + blac
 - [ ] **Fix daily scrape workflow (GitHub Actions).** Guard added (fails fast
   with clear error if secrets empty). Still need to actually set the secrets:
   ```
-  gh secret set VM_HOST --body "136.67.47.167"
+  gh secret set VM_HOST --body "<VM_PUBLIC_IP>"
   gh secret set VM_USER --body "kromylodd"
   gh secret set VM_SSH_KEY < ~/.ssh/google_compute_engine
   ```
