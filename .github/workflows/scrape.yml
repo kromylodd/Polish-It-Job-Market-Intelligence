@@ -59,6 +59,12 @@ jobs:
           # Add VM host key to known_hosts (avoids interactive prompt)
           ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
+      - name: Sync code and deps on VM
+        run: |
+          ssh -i ~/.ssh/vm_key -o StrictHostKeyChecking=no \
+            "${VM_USER}@${VM_HOST}" \
+            "cd ${PIPELINE_DIR} && git pull --ff-only origin main && .venv-pipeline/bin/pip install -q -r pipeline-requirements.txt && mkdir -p data && echo '==> Sync complete'"
+
       - name: SCP data to VM
         run: |
           scp -i ~/.ssh/vm_key -o StrictHostKeyChecking=no \
@@ -68,6 +74,7 @@ jobs:
 
       - name: Trigger pipeline on VM
         run: |
+          set -o pipefail
           ssh -i ~/.ssh/vm_key -o StrictHostKeyChecking=no \
             "${VM_USER}@${VM_HOST}" \
             "cd ${PIPELINE_DIR} && .venv-pipeline/bin/python -m pipeline.run_pipeline 2>&1" | tee /tmp/pipeline_output.log
