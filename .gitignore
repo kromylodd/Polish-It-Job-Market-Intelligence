@@ -75,3 +75,9 @@ CV_PLAN.txt
 FULL_CAREER_PLAN.txt
 LINKEDIN_*
 restrictions.txt
+
+# Agent working files (local dev context — not for publication)
+AGENT_MEMORY.md
+TODO.md
+*_prompt.txt
+*_prompts.txt
