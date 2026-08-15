@@ -1879,10 +1879,18 @@ def _build_tracker_message(
     lines = [header]
 
     for a in page_rows:
-        title = a.get("title") or a.get("listing_id")
-        company = f" @ {html.escape(str(a['company']))}" if a.get("company") else ""
-        link = f"\n   {a['url']}" if a.get("url") else ""
-        lines.append(f"{icon.get(a['status'], '•')} {html.escape(str(title))}{company}{link}")
+        if a.get("title"):
+            title = html.escape(str(a["title"]))
+            company = f" @ {html.escape(str(a['company']))}" if a.get("company") else ""
+            link = f"\n   {a['url']}" if a.get("url") else ""
+        else:
+            # Metadata never captured and the offer is no longer in the snapshot
+            # (de-listed / aged out). Show a readable placeholder instead of a
+            # raw listing id the user can't make sense of.
+            title = "<i>Offer no longer available</i>"
+            company = ""
+            link = ""
+        lines.append(f"{icon.get(a['status'], '•')} {title}{company}{link}")
 
     if total > _TRACKER_PAGE_SIZE:
         lines.append(f"\n<i>Page {page + 1}/{total_pages} ({total} total)</i>")
@@ -1907,6 +1915,39 @@ def _build_tracker_message(
         rows.append(nav_buttons)
 
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _hydrate_tracker_rows(chat_id: int, rows: list[dict]) -> list[dict]:
+    """Fill in missing title/company/url for tracked rows from the live snapshot.
+
+    Rows tracked via an inline button while the listing wasn't in the in-memory
+    cache (bot restarted or LRU-evicted between showing the listing and the tap)
+    get saved with NULL metadata, so the tracker would otherwise render a raw
+    listing id. Here we recover the offer's title/link from the current market
+    snapshot and persist it back to the tracker DB so the fix is permanent and
+    the lookup only happens once. Offers that have aged out of the snapshot stay
+    without metadata and are shown as a friendly placeholder by the renderer.
+    """
+    for a in rows:
+        if a.get("title"):
+            continue
+        lid = a.get("listing_id")
+        meta = serving.listing_meta(lid) if lid else None
+        if not meta or not meta.get("title"):
+            continue
+        a["title"] = meta.get("title")
+        a["company"] = meta.get("company")
+        a["url"] = meta.get("url")
+        # Persist so future views are instant and survive restarts.
+        tracker.set_status(
+            chat_id,
+            lid,
+            a["status"],
+            title=meta.get("title"),
+            company=meta.get("company"),
+            url=meta.get("url"),
+        )
+    return rows
 
 
 async def _do_mytracker(context, chat_id: int, *, status_filter: str | None = None, page: int = 0):
@@ -1934,6 +1975,7 @@ async def _do_mytracker(context, chat_id: int, *, status_filter: str | None = No
         )
         return
 
+    page_rows = await asyncio.to_thread(_hydrate_tracker_rows, chat_id, page_rows)
     text, keyboard = _build_tracker_message(page_rows, c, status_filter, page, total)
     await context.bot.send_message(
         chat_id, text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=keyboard
@@ -1966,6 +2008,7 @@ async def _callback_tracker_page(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("No offers with that status")
         return
 
+    page_rows = await asyncio.to_thread(_hydrate_tracker_rows, chat_id, page_rows)
     text, keyboard = _build_tracker_message(page_rows, c, status_filter, page, total)
     await query.answer()
     try:

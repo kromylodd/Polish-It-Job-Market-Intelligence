@@ -61,3 +61,72 @@ def test_get_latest_listings_filters_snapshot(tmp_path, monkeypatch):
 
     listings = bot._get_latest_listings(dict(DEFAULT_USER_CONFIG), limit=1)
     assert len(listings) == 1
+
+
+def test_listing_meta_found_and_missing(tmp_path, monkeypatch):
+    dbp = tmp_path / "pipeline.duckdb"
+    _make_snapshot_db(dbp)
+    monkeypatch.setattr(serving, "SERVING_DB_PATH", dbp)
+
+    meta = serving.listing_meta("id1")
+    assert meta is not None
+    assert meta["title"] == "Senior Dev"
+    assert meta["company"] == "Acme"
+    assert meta["url"] == "https://justjoin.it/offers/slug-1"
+
+    # An id not in the snapshot (de-listed / aged out) yields None.
+    assert serving.listing_meta("gone-uuid") is None
+
+
+def test_hydrate_tracker_rows_backfills_and_persists(tmp_path, monkeypatch):
+    import importlib
+
+    dbp = tmp_path / "pipeline.duckdb"
+    _make_snapshot_db(dbp)
+    monkeypatch.setattr(serving, "SERVING_DB_PATH", dbp)
+
+    monkeypatch.setenv("TRACKER_DB_PATH", str(tmp_path / "tracker.db"))
+    import telegram_bot.tracker as tracker_mod
+
+    tracker = importlib.reload(tracker_mod)
+    monkeypatch.setattr(bot, "tracker", tracker)
+
+    # Simulate a row tracked via inline button while metadata was uncached.
+    tracker.set_status(7, "id1", "interested")
+    rows, _ = tracker.list_page(7, None, 10, 0)
+    assert rows[0].get("title") is None
+
+    hydrated = bot._hydrate_tracker_rows(7, rows)
+    assert hydrated[0]["title"] == "Senior Dev"
+    assert hydrated[0]["url"] == "https://justjoin.it/offers/slug-1"
+
+    # Backfill was persisted to the tracker DB.
+    persisted = tracker.list_page(7, None, 10, 0)[0][0]
+    assert persisted["title"] == "Senior Dev"
+    assert persisted["company"] == "Acme"
+
+
+def test_hydrate_tracker_rows_leaves_delisted_untouched(tmp_path, monkeypatch):
+    import importlib
+
+    dbp = tmp_path / "pipeline.duckdb"
+    _make_snapshot_db(dbp)
+    monkeypatch.setattr(serving, "SERVING_DB_PATH", dbp)
+
+    monkeypatch.setenv("TRACKER_DB_PATH", str(tmp_path / "tracker.db"))
+    import telegram_bot.tracker as tracker_mod
+
+    tracker = importlib.reload(tracker_mod)
+    monkeypatch.setattr(bot, "tracker", tracker)
+
+    tracker.set_status(7, "gone-uuid", "rejected")
+    rows, _ = tracker.list_page(7, None, 10, 0)
+    hydrated = bot._hydrate_tracker_rows(7, rows)
+    assert hydrated[0].get("title") is None
+
+
+def test_build_tracker_message_placeholder_for_missing_title():
+    rows = [{"listing_id": "gone-uuid", "status": "rejected", "title": None}]
+    text, _ = bot._build_tracker_message(rows, {"rejected": 1}, None, 0, 1)
+    assert "gone-uuid" not in text
+    assert "Offer no longer available" in text
