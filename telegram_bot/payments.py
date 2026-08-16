@@ -479,6 +479,11 @@ def due_for_reminder(now: float | None = None) -> list[dict]:
     already in the grace window), isn't fully expired, and hasn't been reminded
     within the cooldown. Each row: ``chat_id``, ``tier``, ``expires_at``,
     ``status`` ('active' near expiry, or 'grace').
+
+    Post-expiry (grace) reminders are sent only once: if the user has already
+    been reminded after their expiry timestamp, they won't appear here again.
+    Pre-expiry reminders still respect the normal cooldown so users get periodic
+    nudges as their subscription approaches expiry.
     """
     now = time.time() if now is None else now
     remind_from = RENEWAL_REMIND_DAYS * 86400
@@ -488,11 +493,10 @@ def due_for_reminder(now: float | None = None) -> list[dict]:
         try:
             _init(conn)
             rows = conn.execute(
-                "SELECT chat_id, tier, expires_at FROM subscriptions "
+                "SELECT chat_id, tier, expires_at, last_reminded_at FROM subscriptions "
                 "WHERE (expires_at - ?) <= ? "  # within the pre-expiry reminder window
-                "  AND (expires_at + ?) > ? "  # not fully past grace
-                "  AND (last_reminded_at IS NULL OR (? - last_reminded_at) > ?)",
-                (remind_from, now, grace_end_offset, now, now, _REMIND_COOLDOWN_SECONDS),
+                "  AND (expires_at + ?) > ? ",  # not fully past grace
+                (remind_from, now, grace_end_offset, now),
             ).fetchall()
         finally:
             conn.close()
@@ -501,6 +505,15 @@ def due_for_reminder(now: float | None = None) -> list[dict]:
         status = _status(r["expires_at"], now)
         if status is None:
             continue
+        last_reminded = r["last_reminded_at"] or 0
+        if status == "grace":
+            # Post-expiry: only remind once (skip if already reminded after expiry)
+            if last_reminded >= r["expires_at"]:
+                continue
+        else:
+            # Pre-expiry: respect the normal cooldown
+            if last_reminded and (now - last_reminded) <= _REMIND_COOLDOWN_SECONDS:
+                continue
         due.append(
             {
                 "chat_id": r["chat_id"],

@@ -362,6 +362,39 @@ def hot_technologies(limit: int = 10) -> list[dict]:
     )
 
 
+def listing_meta(listing_id: str) -> dict | None:
+    """Look up display metadata for a single listing by its id.
+
+    Reads the current market snapshot mart and returns ``{title, company, url}``
+    (url built from the listing's slug), or ``None`` if the id isn't present —
+    e.g. the offer has aged out of the snapshot / been de-listed at the source.
+
+    Used to hydrate tracker rows whose metadata wasn't captured at button-press
+    time (bot restart or LRU eviction between showing a listing and tracking it),
+    so the tracker shows the offer title/link instead of a raw id.
+    """
+    from urllib.parse import quote
+
+    lid = str(listing_id or "").strip()
+    if not lid:
+        return None
+    rows = _query(
+        f"SELECT title, company_name, slug FROM {_T_SNAPSHOT} "  # noqa: S608
+        "WHERE CAST(listing_id AS VARCHAR) = ? LIMIT 1",
+        [lid],
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    slug = r.get("slug") or ""
+    url = f"https://justjoin.it/offers/{quote(str(slug), safe='')}" if slug else None
+    return {
+        "title": r.get("title"),
+        "company": r.get("company_name"),
+        "url": url,
+    }
+
+
 def rank_listings_by_skills(listings: list[dict], skills: list[str]) -> list[dict]:
     """Rank listings by percent overlap with the user's skill set.
 
