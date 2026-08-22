@@ -19,6 +19,7 @@ An end-to-end **data platform** for Poland's IT job market — built as a produc
 - [Tech Stack](#tech-stack)
 - [Key Differentiators vs. Project #1](#key-differentiators-vs-project-1-housing)
 - [The Product: Telegram Bot](#the-product-telegram-bot)
+- [Product in Action](#product-in-action)
 - [Payment Infrastructure (Telegram Stars)](#payment-infrastructure-telegram-stars)
 - [The Serving Layer: Why a Single DuckDB File](#the-serving-layer-why-a-single-duckdb-file)
 - [Data Model](#data-model)
@@ -105,6 +106,28 @@ The gold marts back a live bot that runs 24/7 on the GCP VM. Currently operates 
 - `/report` — a weekly market report (top hiring companies, hottest tech WoW, salary trend) + chart.
 - `/export` — filtered listings as a CSV.
 - **Application tracker** — one-tap `✅ Applied / 👀 Interested / ❌ Rejected` buttons under each listing (and `/applied`, `/mytracker` with paginated history). This is the main *retention* lever — it turns a broadcast channel into a personal tool users keep coming back to.
+
+## Product in Action
+
+The bot running in personal mode (all features free). These are live outputs read straight from the gold marts in `pipeline.duckdb`.
+
+**Daily push alert** — new listings matching the user's filters, each tagged with a **% skill-match** score (from `/myskills`), delivered at 08:00 Warsaw and deduped per `(listing, chat)`.
+
+<img src="docs/screenshots/bot_daily_alert.png" alt="Daily alert with per-listing skill-match scores" width="420">
+
+**Universal tolerance-matching filters** — seven dimensions (seniority, category, tech, workplace, employment, salary, city) edited through an inline-keyboard menu, with a per-user "how many dimensions may mismatch" tolerance.
+
+<img src="docs/screenshots/bot_filters.png" alt="Interactive filter menu with tolerance matching" width="420">
+
+**`/skills <tech>` — technology co-occurrence** (the standout feature): which technologies are most often requested alongside a given one, as a share of all listings mentioning it — straight from `mart_tech_co_occurrence`.
+
+<img src="docs/screenshots/bot_skills_cooccurrence.png" alt="Technology co-occurrence for SQL" width="420">
+
+**`/salary <tech> [seniority]`** — median plus a P25–P75 typical range, broken out **by contract type** (B2B vs UoP vs mandate). Salary is period-normalized to a monthly basis upstream, so contract types are directly comparable.
+
+<img src="docs/screenshots/bot_salary.png" alt="Salary breakdown by contract type for SQL junior" width="420">
+
+> Note: the bot also renders `/trend` and `/report` time-series charts, but those aren't shown here yet — the pipeline has only been collecting daily snapshots for a couple of weeks, so the trend history is too short to be representative (see the *Add historical trend data* item under [Roadmap](#roadmap)).
 
 ## Payment Infrastructure (Telegram Stars)
 

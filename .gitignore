@@ -78,6 +78,7 @@ restrictions.txt
 
 # Agent working files (local dev context — not for publication)
 AGENT_MEMORY.md
+memory.md
 TODO.md
 *_prompt.txt
 *_prompts.txt
