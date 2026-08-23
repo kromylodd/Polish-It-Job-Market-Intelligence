@@ -14,6 +14,7 @@ duckdb = pytest.importorskip("duckdb")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test")
 
 from telegram_bot import bot, serving  # noqa: E402
+from telegram_bot.handlers import tracker_cmds  # noqa: E402
 
 
 def _make_snapshot_db(path):
@@ -89,14 +90,14 @@ def test_hydrate_tracker_rows_backfills_and_persists(tmp_path, monkeypatch):
     import telegram_bot.tracker as tracker_mod
 
     tracker = importlib.reload(tracker_mod)
-    monkeypatch.setattr(bot, "tracker", tracker)
+    monkeypatch.setattr(tracker_cmds, "tracker", tracker)
 
     # Simulate a row tracked via inline button while metadata was uncached.
     tracker.set_status(7, "id1", "interested")
     rows, _ = tracker.list_page(7, None, 10, 0)
     assert rows[0].get("title") is None
 
-    hydrated = bot._hydrate_tracker_rows(7, rows)
+    hydrated = tracker_cmds._hydrate_tracker_rows(7, rows)
     assert hydrated[0]["title"] == "Senior Dev"
     assert hydrated[0]["url"] == "https://justjoin.it/offers/slug-1"
 
@@ -117,11 +118,11 @@ def test_hydrate_tracker_rows_leaves_delisted_untouched(tmp_path, monkeypatch):
     import telegram_bot.tracker as tracker_mod
 
     tracker = importlib.reload(tracker_mod)
-    monkeypatch.setattr(bot, "tracker", tracker)
+    monkeypatch.setattr(tracker_cmds, "tracker", tracker)
 
     tracker.set_status(7, "gone-uuid", "rejected")
     rows, _ = tracker.list_page(7, None, 10, 0)
-    hydrated = bot._hydrate_tracker_rows(7, rows)
+    hydrated = tracker_cmds._hydrate_tracker_rows(7, rows)
     assert hydrated[0].get("title") is None
 
 

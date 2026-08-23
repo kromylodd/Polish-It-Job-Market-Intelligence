@@ -17,7 +17,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify: the bot sends sd_notify READY=1 once it's initialised and then
+# pings WATCHDOG=1 on a timer (see telegram_bot/observability.py). If the event
+# loop stalls the pings stop and systemd restarts the process — this catches a
+# *silently* stuck bot that Restart=always (exit-only) never would.
+Type=notify
+WatchdogSec=120
 User=botuser
 Group=botuser
 WorkingDirectory=/opt/polish-it-job-market-intelligence

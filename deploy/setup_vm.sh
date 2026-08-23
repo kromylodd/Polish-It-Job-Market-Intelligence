@@ -67,7 +67,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify + WatchdogSec: the bot pings the systemd watchdog from its event
+# loop (telegram_bot/observability.py). If the loop stalls, systemd restarts it
+# — catching a silently-wedged bot that plain Restart=always cannot.
+Type=notify
+WatchdogSec=120
 WorkingDirectory=${REPO_DIR}
 EnvironmentFile=${REPO_DIR}/.env
 Environment=PYTHONUNBUFFERED=1

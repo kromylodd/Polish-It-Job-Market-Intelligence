@@ -3,7 +3,7 @@
 An end-to-end **data platform** for Poland's IT job market — built as a production-style portfolio project. A scheduled scraper feeds a self-hosted medallion pipeline (bronze → silver → gold star schema via Polars + DuckDB + dbt) on a GCP e2-micro VM, and the gold marts power an **interactive Telegram bot** with daily job alerts and analytics (salary insights, tech co-occurrence, company intel, application tracker).
 
 [![CI](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/ci.yml/badge.svg)](https://github.com/kromylodd/Polish-It-Job-Market-Intelligence/actions/workflows/ci.yml)
-[![tests](https://img.shields.io/badge/tests-113%20passing-success)](#testing)
+[![tests](https://img.shields.io/badge/tests-119%20passing-success)](#testing)
 [![DuckDB](https://img.shields.io/badge/DuckDB-Pipeline-FFF000?logo=duckdb&logoColor=black)](#tech-stack)
 
 > **Stage 3 companion** to the [Polish Housing Market Intelligence Platform](https://github.com/kromylodd/Polish-Housing-Market-Intelligence-Platform) — deliberately built on a **different stack** (DuckDB / Polars / dbt-duckdb / systemd vs. GCP / BigQuery / Airflow / Terraform) to demonstrate cross-platform fluency, then taken one step further: this one ships a **user-facing product** on top of the warehouse.
@@ -81,6 +81,7 @@ A single `pipeline.duckdb` file is both the warehouse and the serving layer:
 | Bot state | SQLite (subscriptions, payments, application tracker, analytics, alert idempotency) — all `0600` via a shared connection helper |
 | Charts | matplotlib (Agg backend, headless PNG) |
 | Hosting | GCP e2-micro free tier (systemd services for bot + pipeline) |
+| Observability | systemd watchdog (`Type=notify` + `WatchdogSec`, sd_notify liveness) + global error handler & background-job guards that alert the admin |
 
 ## Key Differentiators vs. Project #1 (Housing)
 
@@ -204,13 +205,15 @@ Real failures hit and fixed during development — the interesting part of a dat
 - **JSON array unnest in dbt.** DuckDB can't `LATERAL VIEW EXPLODE` like Spark. Solved with a `json_array_length` + `range` + `unnest` pattern.
 - **Multi-user & idempotency bugs.** Per-user config isolation, a per-`(listing, chat)` idempotency log so alerts never duplicate.
 
-**Post-migration hardening pass** (full code review → 113 tests passing):
+**Post-migration hardening pass** (full code review → 119 tests passing):
 
 - **No lost payments on restart.** `drop_pending_updates=False`; payment handling is fully idempotent (`record_and_activate` keyed on `charge_id`).
 - **Billing data isn't world-readable.** All SQLite stores go through one connection helper enforcing `0600`; systemd `UMask=0077`.
 - **Pipeline DB is read-only from the bot.** Alert idempotency log in its own SQLite file.
 - **Stable tracker pagination.** SQL ordered by a stable key (`created_at`).
 - **Hot-path subscription lookups** from a short-TTL cache (invalidated on mutation).
+- **Silent-failure detection.** `Restart=always` only catches a process that *exits*; a wedged event loop stays "alive but dead." The bot now runs under `Type=notify` and feeds the systemd **watchdog** (`WatchdogSec`) with `sd_notify` pings from its own event loop (pure-Python, no extra dependency) — if the loop stalls, systemd restarts it. A global error handler and background-job guards (daily broadcast, renewal scan) surface failures to the admin instead of vanishing into the log. All watchdog/notify code is a no-op off systemd (local dev, Docker, CI).
+- **`bot.py` split into cohesive handler modules.** The former ~2,600-line monolith is now a thin assembler (`build_application()`) wiring domain modules under `telegram_bot/handlers/`; a wiring smoke test builds the full `Application` so a broken import or missing handler fails CI rather than production.
 
 ## Project Structure
 
@@ -232,7 +235,18 @@ polish-it-job-market-intelligence/
 │   ├── snapshots/ · tests/ · seeds/
 │   └── profiles.yml                # dbt-duckdb (local + ci targets)
 ├── telegram_bot/
-│   ├── bot.py                      # commands, inline menus, payment flow, JobQueue
+│   ├── bot.py                      # thin assembler: build_application() wires handlers + JobQueue
+│   ├── handlers/                   # command/callback handlers, split by domain
+│   │   ├── common.py               # shared: config load/save, feature gating, data helpers, listing cache
+│   │   ├── core.py                 # /start /help /privacy /feedback
+│   │   ├── filter_cmds.py          # /filters menu + all filter-setting commands (incl. /salary insights)
+│   │   ├── listings.py             # /latest, /stats
+│   │   ├── analytics_admin.py      # /analytics (admin)
+│   │   ├── premium_analytics.py    # /skills /trend /company /export /report
+│   │   ├── tracker_cmds.py         # /applied /interested /rejected /mytracker + button callbacks
+│   │   ├── subscriptions.py        # Telegram Stars flow + admin grants + /premium menu
+│   │   └── jobs.py                 # daily broadcast + renewal-reminder background jobs
+│   ├── observability.py            # systemd watchdog (sd_notify) + error handler → admin alerts
 │   ├── filters.py                  # universal tolerance-matching filter logic
 │   ├── serving.py                  # reads gold.* directly from pipeline DuckDB
 │   ├── payments.py                 # Telegram Stars subscriptions (SQLite) + cache
@@ -241,7 +255,7 @@ polish-it-job-market-intelligence/
 │   ├── notify.py                   # daily alert broadcast (08:00 Warsaw)
 │   ├── dbutil.py                   # shared SQLite helper (0600 perms + locking)
 │   ├── config_store.py / analytics.py
-│   └── tests/                      # filters, analytics, config, serving, tracker, payments, bot_data
+│   └── tests/                      # filters, analytics, config, serving, tracker, payments, bot_data, bot_wiring
 │   # runtime SQLite (gitignored): payments.db · tracker.db · analytics.db · alerts.db
 ├── deploy/
 │   ├── setup_vm.sh                 # one-shot: both venvs + both services + timer
@@ -264,7 +278,7 @@ polish-it-job-market-intelligence/
 
 | Job | What it does |
 |---|---|
-| `lint-and-test` | `ruff check .`, `ruff format --check .`, `black --check .`, `pytest` (113 tests) |
+| `lint-and-test` | `ruff check .`, `ruff format --check .`, `black --check .`, `pytest` (119 tests) |
 | `dbt-parse` | `dbt deps` + `dbt parse` (pinned dbt-duckdb) to catch model errors early |
 
 **`.github/workflows/scrape.yml`** — scheduled + manual (`workflow_dispatch`):
@@ -278,7 +292,7 @@ polish-it-job-market-intelligence/
 
 The bot is long-polling (no inbound ports), so any always-on Linux box works.
 
-- **Production (current):** two systemd user services on a GCP e2-micro — the bot (`telegram-bot.service`) and the pipeline (`pipeline.service` + `pipeline.timer`). `loginctl enable-linger` so both survive logout/reboot.
+- **Production (current):** two systemd user services on a GCP e2-micro — the bot (`telegram-bot.service`) and the pipeline (`pipeline.service` + `pipeline.timer`). `loginctl enable-linger` so both survive logout/reboot. The bot unit runs `Type=notify` with `WatchdogSec` so systemd restarts it if the event loop goes silently unresponsive (not just on crash).
 - **One-shot deploy:** `./deploy/setup_vm.sh` creates both venvs, installs all deps, registers both services and the timer.
 - **Redeploy:** SSH in → `git pull` + restart service. (The scrape workflow also auto-syncs code before each run.)
 
@@ -286,13 +300,14 @@ The bot is long-polling (no inbound ports), so any always-on Linux box works.
 
 ```bash
 pip install -r requirements-ci.txt
-PYTHONPATH=. pytest -q   # 113 tests: scraper parser, filters, analytics, config,
+PYTHONPATH=. pytest -q   # 119 tests: scraper parser, filters, analytics, config,
                          # serving layer, application tracker (+ pagination),
                          # Stars payments (idempotent activation, refunds, cache),
-                         # daily-broadcast caps, reports, local-cache reader
+                         # daily-broadcast caps, reports, local-cache reader,
+                         # bot handler-wiring smoke test
 ```
 
-The serving/reports/bot-data tests seed a temporary DuckDB with sample gold-schema marts so the analytics helpers (weighted salary aggregation, co-occurrence %, skill ranking, chart PNG generation) and the bot's local-cache reader are exercised for real.
+The serving/reports/bot-data tests seed a temporary DuckDB with sample gold-schema marts so the analytics helpers (weighted salary aggregation, co-occurrence %, skill ranking, chart PNG generation) and the bot's local-cache reader are exercised for real. The wiring test builds the full `Application` (no network/token needed) so any broken handler import from the module split fails in CI.
 
 ## Setup
 
@@ -372,12 +387,11 @@ Documented deliberately — a recruiter should see engineering judgment about tr
 - ~~Migrate pipeline off Databricks Free Edition (ToS conflict).~~ ✅ Self-hosted Polars + DuckDB + dbt-duckdb.
 - ~~Delete legacy Databricks files (notebooks, DAB bundle, dashboards).~~ ✅
 - ~~Auto-sync VM code on each daily run (git pull + pip install).~~ ✅
+- ~~Split `bot.py` (~2,600 lines) into cohesive handler modules.~~ ✅ `telegram_bot/handlers/` + thin `build_application()` assembler.
+- ~~Observability: systemd watchdog / liveness ping for silent failures.~~ ✅ `Type=notify` + `WatchdogSec` fed by an event-loop ping, plus error-handler/job admin alerts.
 
 ### Open
 - [ ] Add historical trend data (backfill from archived raw-scrape snapshots).
-- [ ] Off-box nightly backup of `payments.db` (billing data) to object storage.
-- [ ] Split `bot.py` (~2600 lines) into cohesive handler modules.
-- [ ] Observability: systemd watchdog / liveness ping for silent failures.
 - [ ] Evaluate Adzuna API as a licensed alternative data source for commercial use.
 
 ## Scraping Ethics and Legal Posture
