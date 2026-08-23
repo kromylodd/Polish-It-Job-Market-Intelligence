@@ -330,6 +330,26 @@ cp /path/to/.env .env && chmod 600 .env
 ./deploy/setup_vm.sh
 ```
 
+### GitHub Actions Secrets
+
+Only the daily scrape workflow (`.github/workflows/scrape.yml`) needs secrets — it SSHes into the VM to sync code, upload data, and trigger the pipeline. Set these in **Settings → Secrets and variables → Actions**:
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `VM_HOST` | yes | VM public IP or hostname (for SSH/SCP) |
+| `VM_USER` | yes | SSH username on the VM |
+| `VM_SSH_KEY` | yes | Private SSH key (PEM contents) authorized on the VM |
+| `PIPELINE_DIR` | no | Repo path on the VM; defaults to `/home/kromylodd/polish-it-job-market-intelligence` |
+
+```bash
+# via the gh CLI:
+gh secret set VM_HOST   --body "<vm-ip>"
+gh secret set VM_USER   --body "<ssh-user>"
+gh secret set VM_SSH_KEY < ~/.ssh/vm_deploy_key
+```
+
+The CI workflow (`ci.yml` — lint, format, tests, `dbt parse`) needs **no secrets**. The Telegram bot token is not a GitHub secret either; it lives only in the VM's `.env`.
+
 ## Known Limitations
 
 Documented deliberately — a recruiter should see engineering judgment about trade-offs, not just green checkmarks.
