@@ -30,6 +30,8 @@ import socket
 import traceback
 from collections.abc import Awaitable, Callable
 
+from telegram.error import NetworkError, TimedOut
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +107,24 @@ def make_error_handler(admin_chat_id: int) -> Callable[..., Awaitable[None]]:
 
     async def error_handler(update: object, context) -> None:  # noqa: ANN001 (PTB signature)
         err = context.error
+
+        # Transient network errors raised by the long-polling fetch loop
+        # (getUpdates) are normal and self-healing: PTB's _network_loop_retry
+        # catches them and retries with backoff, so the bot keeps working. These
+        # arrive here with update=None (Application.run_polling dispatches poll
+        # errors via process_error(update=None)). Don't page the admin for them —
+        # just log at WARNING. Network errors *during update handling*
+        # (update is not None) still alert, since those may lose a user's action.
+        #
+        # Match the exact transient types only. In PTB, BadRequest/Forbidden-style
+        # errors also subclass NetworkError, so an isinstance() check would wrongly
+        # swallow them; the httpx transport only ever raises plain NetworkError or
+        # TimedOut for genuine connectivity blips (see request/_httpxrequest.py).
+        if update is None and type(err) in (NetworkError, TimedOut):
+            logger.warning("Transient network error in polling loop: %s: %s",
+                           type(err).__name__, err)
+            return
+
         logger.error("Unhandled exception while handling an update", exc_info=err)
         if not admin_chat_id:
             return
