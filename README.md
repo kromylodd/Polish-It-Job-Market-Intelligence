@@ -89,7 +89,7 @@ A single `pipeline.duckdb` file is both the warehouse and the serving layer:
 - **Many-to-many bridge tables** (technology, city) — a star-schema pattern project #1 didn't need.
 - **A shipped product with a payment layer** — not just a dashboard. Telegram bot + Stars payment flow + retention features.
 - **Zero-dependency serving** — the bot reads directly from the pipeline's DuckDB output with no network, sync, or external service needed at query time.
-- **Full migration story** — started on Databricks Free Edition, migrated to self-hosted when commercial ToS restrictions became a blocker. Architecture decisions documented.
+- **Full migration story** — started on Databricks Free Edition, migrated to self-hosted when commercial ToS restrictions became a blocker. Architecture decisions [documented as ADRs](docs/architecture_decisions.md).
 
 ## The Product: Telegram Bot
 
@@ -127,7 +127,7 @@ The bot running in personal mode (all features free). These are live outputs rea
 
 <img src="docs/screenshots/bot_salary.png" alt="Salary breakdown by contract type for SQL junior" width="420">
 
-> Note: the bot also renders `/trend` and `/report` time-series charts, but those aren't shown here yet — the pipeline has only been collecting daily snapshots for a couple of weeks, so the trend history is too short to be representative (see the *Add historical trend data* item under [Roadmap](#roadmap)).
+> Note: the bot also renders `/trend` and `/report` time-series charts, but those aren't shown here yet — the self-hosted pipeline only began retaining daily snapshots after the mid-August migration to DuckDB, so the trend history is still too short to be representative (see the *Add historical trend data* item under [Roadmap](#roadmap)).
 
 ## Payment Infrastructure (Telegram Stars)
 
