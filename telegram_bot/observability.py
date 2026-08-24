@@ -121,8 +121,9 @@ def make_error_handler(admin_chat_id: int) -> Callable[..., Awaitable[None]]:
         # swallow them; the httpx transport only ever raises plain NetworkError or
         # TimedOut for genuine connectivity blips (see request/_httpxrequest.py).
         if update is None and type(err) in (NetworkError, TimedOut):
-            logger.warning("Transient network error in polling loop: %s: %s",
-                           type(err).__name__, err)
+            logger.warning(
+                "Transient network error in polling loop: %s: %s", type(err).__name__, err
+            )
             return
 
         logger.error("Unhandled exception while handling an update", exc_info=err)
