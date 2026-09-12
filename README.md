@@ -157,7 +157,7 @@ This is a **zero-dependency serving architecture**: the bot can answer any query
 ## Data Model
 
 **Medallion architecture** (DuckDB schemas):
-- `bronze` — raw ingested listings, append-only (Polars reads JSON, writes to DuckDB).
+- `bronze` — raw ingested listings, append-only with rolling 30-day retention (Polars reads JSON, writes to DuckDB; rows older than `BRONZE_RETENTION_DAYS` are pruned after each successful silver step).
 - `silver` — cleaned, deduplicated, tech-parsed listings (DuckDB SQL + Polars).
 - `gold` — star schema: dimensions, fact, bridges, and analytical marts (dbt-duckdb).
 
@@ -196,6 +196,7 @@ A single listing can require many technologies and span multiple cities, so `bri
 
 Real failures hit and fixed during development — the interesting part of a data product isn't the happy path:
 
+- **Bronze table OOM on e2-micro.** `silver_clean` does a full scan + dedup of all bronze rows on every run. After 32 days of unbounded append (~318k rows), this OOM-killed the silver step on the 1 GB VM mid-run. Fixed in two parts: (1) one-time DELETE of rows older than 30 days; (2) permanent `prune_bronze()` step that runs after each successful silver step and deletes rows older than `BRONZE_RETENTION_DAYS` (default 30), capping the table at a rolling ~300k rows.
 - **Databricks double-trigger bug.** Two overlapping mechanisms (file-arrival trigger + explicit API `run-now`) caused the pipeline to run twice per scrape. Fixed by eliminating file-arrival, using API-only triggering, and switching to a fixed filename.
 - **Cold-warehouse hang froze the bot.** The original serving layer queried Databricks SQL on demand with a 900-second retry default. Fixed by migrating to a local DuckDB architecture — zero network, zero cold starts, sub-millisecond queries.
 - **DuckDB naming collision post-migration.** dbt created `silver.stg_listings` as a VIEW, but the pipeline's silver_clean step tried to `DROP TABLE` on it. DuckDB correctly rejects this. Fixed by namespacing the pipeline's intermediate table (`silver.cleaned_listings`) apart from dbt's staging view.
@@ -222,9 +223,11 @@ polish-it-job-market-intelligence/
 ├── pipeline/
 │   ├── __init__.py                 # Config (DB path, schemas, data dir)
 │   ├── bronze_ingest.py            # Polars: JSON → DuckDB append (idempotent)
+│   ├── bronze_prune.py             # Retention pruning: delete bronze rows older than BRONZE_RETENTION_DAYS
 │   ├── silver_clean.py             # DuckDB SQL: dedup + standardize
 │   ├── silver_tech_parse.py        # Polars: regex tech canonicalization
-│   └── run_pipeline.py             # Orchestrator (bronze → silver → dbt)
+│   ├── run_pipeline.py             # Orchestrator (bronze → silver → prune → dbt)
+│   └── tests/                      # pipeline unit tests (prune_bronze)
 ├── scraper/
 │   ├── scraper.py                  # justjoin.it JSON API, cursor pagination, retries
 │   ├── parser.py                   # typed field extraction + normalization

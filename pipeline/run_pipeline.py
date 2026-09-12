@@ -30,8 +30,11 @@ import sys
 import time
 from pathlib import Path
 
+import duckdb
+
 from pipeline import DATA_DIR, PIPELINE_DB_PATH, PROJECT_ROOT, RAW_LISTINGS_FILE
 from pipeline.bronze_ingest import ingest
+from pipeline.bronze_prune import prune_bronze
 from pipeline.silver_clean import clean
 from pipeline.silver_tech_parse import tech_parse
 
@@ -115,7 +118,7 @@ def run_pipeline(
 
     # --- Step 1: Bronze Ingest ---
     logger.info("-" * 40)
-    logger.info("STEP 1/4: Bronze Ingest")
+    logger.info("STEP 1/5: Bronze Ingest")
     try:
         bronze_rows = ingest(filepath)
         logger.info("Bronze: %d rows ingested", bronze_rows)
@@ -127,7 +130,7 @@ def run_pipeline(
 
     # --- Step 2: Silver Clean ---
     logger.info("-" * 40)
-    logger.info("STEP 2/4: Silver Clean")
+    logger.info("STEP 2/5: Silver Clean")
     try:
         silver_rows = clean()
         logger.info("Silver: %d rows after dedup/clean", silver_rows)
@@ -140,7 +143,7 @@ def run_pipeline(
 
     # --- Step 3: Silver Tech Parse ---
     logger.info("-" * 40)
-    logger.info("STEP 3/4: Silver Tech Parse")
+    logger.info("STEP 3/5: Silver Tech Parse")
     try:
         tech_rows = tech_parse()
         logger.info("Silver tech: %d rows with tech annotations", tech_rows)
@@ -151,9 +154,27 @@ def run_pipeline(
         logger.error("Silver tech parse failed: %s", e, exc_info=True)
         return 1
 
-    # --- Step 4: dbt Build ---
+    # --- Step 4: Bronze Prune ---
+    # Run AFTER silver succeeds so a failed run never prunes data that wasn't
+    # yet captured downstream.  Retention window = BRONZE_RETENTION_DAYS env
+    # var (default 30 days).
     logger.info("-" * 40)
-    logger.info("STEP 4/4: dbt Build")
+    logger.info("STEP 4/5: Bronze Prune")
+    try:
+        con = duckdb.connect(str(PIPELINE_DB_PATH))
+        try:
+            pruned = prune_bronze(con)
+            logger.info("Bronze prune: %d rows deleted", pruned)
+        finally:
+            con.close()
+    except Exception as e:
+        # Prune failure is non-fatal — log and continue so the pipeline doesn't
+        # abort a good run just because the housekeeping step failed.
+        logger.warning("Bronze prune failed (non-fatal): %s", e, exc_info=True)
+
+    # --- Step 5: dbt Build ---
+    logger.info("-" * 40)
+    logger.info("STEP 5/5: dbt Build")
     if not _run_dbt(["build", "--fail-fast"], "dbt build"):
         return 2
 
