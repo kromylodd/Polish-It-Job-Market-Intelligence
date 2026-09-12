@@ -73,17 +73,13 @@ def prune_bronze(con: duckdb.DuckDBPyConnection, retention_days: int | None = No
         )
         return 0
 
-    con.execute(
-        f"DELETE FROM {BRONZE_TABLE} WHERE ingested_at < {cutoff_expr}"  # noqa: S608
-    )
+    con.execute(f"DELETE FROM {BRONZE_TABLE} WHERE ingested_at < {cutoff_expr}")  # noqa: S608
     con.commit()
 
     # VACUUM only when rows were actually deleted — reclaims storage pages.
     con.execute("VACUUM")
 
-    remaining = con.execute(  # noqa: S608
-        f"SELECT count(*) FROM {BRONZE_TABLE}"
-    ).fetchone()[0]
+    remaining = con.execute(f"SELECT count(*) FROM {BRONZE_TABLE}").fetchone()[0]  # noqa: S608
     logger.info(
         "Bronze prune: deleted %d rows older than %d days (%d rows remain)",
         to_prune,
