@@ -32,7 +32,7 @@ from pathlib import Path
 
 import duckdb
 
-from pipeline import DATA_DIR, PIPELINE_DB_PATH, PROJECT_ROOT, RAW_LISTINGS_FILE
+from pipeline import DATA_DIR, PIPELINE_DB_PATH, PROJECT_ROOT, RAW_LISTINGS_FILE, configure_duckdb
 from pipeline.bronze_ingest import ingest
 from pipeline.bronze_prune import prune_bronze
 from pipeline.silver_clean import clean
@@ -163,6 +163,7 @@ def run_pipeline(
     try:
         con = duckdb.connect(str(PIPELINE_DB_PATH))
         try:
+            configure_duckdb(con)
             pruned = prune_bronze(con)
             logger.info("Bronze prune: %d rows deleted", pruned)
         finally:

@@ -15,7 +15,7 @@ import logging
 
 import duckdb
 
-from pipeline import PIPELINE_DB_PATH, SCHEMA_BRONZE, SCHEMA_SILVER
+from pipeline import PIPELINE_DB_PATH, SCHEMA_BRONZE, SCHEMA_SILVER, configure_duckdb
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ def clean() -> int:
     """
     con = duckdb.connect(str(PIPELINE_DB_PATH))
     try:
+        configure_duckdb(con)
         _ensure_schema(con)
 
         # Verify bronze table exists and has data
