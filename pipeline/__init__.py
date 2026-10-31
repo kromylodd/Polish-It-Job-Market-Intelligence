@@ -60,7 +60,6 @@ def configure_duckdb(con) -> None:  # type: ignore[no-untyped-def]
     Call this immediately after duckdb.connect() in any pipeline step that
     runs large queries (silver_clean, silver_tech_parse, bronze_prune, etc.).
     """
-    import tempfile
 
     # Create the temp dir if it doesn't exist
     Path(DUCKDB_TEMP_DIR).mkdir(parents=True, exist_ok=True)
