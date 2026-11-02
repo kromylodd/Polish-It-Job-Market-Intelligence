@@ -128,38 +128,14 @@ def run_pipeline(
         logger.error("Bronze ingest failed: %s", e, exc_info=True)
         return 1
 
-    # --- Step 2: Silver Clean ---
+    # --- Step 2: Bronze Prune ---
+    # Prune BEFORE silver so the silver ROW_NUMBER() window scan only sees the
+    # retained window (≤ BRONZE_RETENTION_DAYS × ~10 k rows).  On the 1 GB
+    # e2-micro this is the critical ordering: silver scanned all 310 k+ rows
+    # when prune ran after it, which OOM-killed the process (exit 137).
+    # Retention window = BRONZE_RETENTION_DAYS env var (default 30 days).
     logger.info("-" * 40)
-    logger.info("STEP 2/5: Silver Clean")
-    try:
-        silver_rows = clean()
-        logger.info("Silver: %d rows after dedup/clean", silver_rows)
-        if silver_rows == 0:
-            logger.error("Silver table is empty — cannot continue")
-            return 1
-    except Exception as e:
-        logger.error("Silver clean failed: %s", e, exc_info=True)
-        return 1
-
-    # --- Step 3: Silver Tech Parse ---
-    logger.info("-" * 40)
-    logger.info("STEP 3/5: Silver Tech Parse")
-    try:
-        tech_rows = tech_parse()
-        logger.info("Silver tech: %d rows with tech annotations", tech_rows)
-        if tech_rows == 0:
-            logger.error("Silver tech table is empty — cannot continue")
-            return 1
-    except Exception as e:
-        logger.error("Silver tech parse failed: %s", e, exc_info=True)
-        return 1
-
-    # --- Step 4: Bronze Prune ---
-    # Run AFTER silver succeeds so a failed run never prunes data that wasn't
-    # yet captured downstream.  Retention window = BRONZE_RETENTION_DAYS env
-    # var (default 30 days).
-    logger.info("-" * 40)
-    logger.info("STEP 4/5: Bronze Prune")
+    logger.info("STEP 2/5: Bronze Prune")
     try:
         con = duckdb.connect(str(PIPELINE_DB_PATH))
         try:
@@ -172,6 +148,32 @@ def run_pipeline(
         # Prune failure is non-fatal — log and continue so the pipeline doesn't
         # abort a good run just because the housekeeping step failed.
         logger.warning("Bronze prune failed (non-fatal): %s", e, exc_info=True)
+
+    # --- Step 3: Silver Clean ---
+    logger.info("-" * 40)
+    logger.info("STEP 3/5: Silver Clean")
+    try:
+        silver_rows = clean()
+        logger.info("Silver: %d rows after dedup/clean", silver_rows)
+        if silver_rows == 0:
+            logger.error("Silver table is empty — cannot continue")
+            return 1
+    except Exception as e:
+        logger.error("Silver clean failed: %s", e, exc_info=True)
+        return 1
+
+    # --- Step 4: Silver Tech Parse ---
+    logger.info("-" * 40)
+    logger.info("STEP 4/5: Silver Tech Parse")
+    try:
+        tech_rows = tech_parse()
+        logger.info("Silver tech: %d rows with tech annotations", tech_rows)
+        if tech_rows == 0:
+            logger.error("Silver tech table is empty — cannot continue")
+            return 1
+    except Exception as e:
+        logger.error("Silver tech parse failed: %s", e, exc_info=True)
+        return 1
 
     # --- Step 5: dbt Build ---
     logger.info("-" * 40)

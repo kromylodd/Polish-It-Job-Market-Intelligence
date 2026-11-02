@@ -50,7 +50,7 @@ SCHEMA_GOLD = "gold"
 #                        (e.g. "1GB", "512MB").  Defaults to "1GB".
 # DUCKDB_TEMP_DIR      — directory for on-disk spill files.
 #                        Defaults to /tmp/duckdb_tmp (created automatically).
-DUCKDB_MEMORY_LIMIT: str = os.environ.get("DUCKDB_MEMORY_LIMIT", "1GB")
+DUCKDB_MEMORY_LIMIT: str = os.environ.get("DUCKDB_MEMORY_LIMIT", "512MB")
 DUCKDB_TEMP_DIR: str = os.environ.get("DUCKDB_TEMP_DIR", "/tmp/duckdb_tmp")
 
 
